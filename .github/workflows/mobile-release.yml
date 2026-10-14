@@ -1,0 +1,207 @@
+# Builds the Kwema Ride Kenya rider and driver APKs and publishes them to a GitHub Release.
+#
+# The website reads RIDER_APK_URL and DRIVER_APK_URL from Railway variables,
+# so pointing those at the release assets is all it takes to make the download
+# buttons live. No local Flutter toolchain needed.
+#
+# Trigger: push a tag like v0.1.0, or run it by hand from the Actions tab.
+
+name: Build mobile APKs
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Tag for the release (e.g. v0.1.0)'
+        required: true
+        default: 'v0.1.0-preview'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Flutter's Android toolchain needs a JDK; 17 is what current Gradle
+      # expects. Leaving this to the runner default has broken builds before.
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Report toolchain
+        run: flutter --version
+
+      # The repo carries lib/ and pubspec.yaml but no android/ folder —
+      # platform scaffolding is generated rather than committed, because it is
+      # large, noisy in diffs, and regenerable. `flutter create` on an existing
+      # directory adds the missing platform files and leaves lib/ untouched.
+      # `flutter create --overwrite` regenerates pubspec.yaml from the default
+      # template, which silently wipes every dependency and makes the whole
+      # project fail to resolve its imports. The overwrite flag is needed for
+      # the platform files, so pubspec is saved and restored around it.
+      - name: Generate Android platform files
+        working-directory: mobile
+        run: |
+          cp pubspec.yaml /tmp/pubspec.yaml.bak
+          cp analysis_options.yaml /tmp/analysis_options.yaml.bak
+
+          flutter create --platforms=android \
+            --org com.jatelo.kwema.ke \
+            --project-name kwema \
+            --overwrite .
+
+          cp /tmp/pubspec.yaml.bak pubspec.yaml
+          cp /tmp/analysis_options.yaml.bak analysis_options.yaml
+
+          echo "--- restored pubspec dependencies ---"
+          grep -A 20 '^dependencies:' pubspec.yaml
+
+      # The Maps SDK key is injected at build time from a repository secret so
+      # it never sits in the repo. This is the Android-restricted key (SHA-1 +
+      # package name), not the server key — that one must never ship in an APK.
+      # Injected at build time from a repository secret so it never sits in
+      # the repo. This is the Android-restricted key (SHA-1 + package name),
+      # never the server key.
+      - name: Inject Maps API key and permissions
+        working-directory: mobile
+        env:
+          MAPS_KEY: ${{ secrets.ANDROID_MAPS_API_KEY }}
+        run: |
+          if [ -z "$MAPS_KEY" ]; then
+            echo "::warning::ANDROID_MAPS_API_KEY not set - maps will render blank"
+            MAPS_KEY="MISSING_KEY"
+          fi
+          python3 tool/patch_android_manifest.py \
+            android/app/src/main/AndroidManifest.xml "$MAPS_KEY"
+
+      - name: Install dependencies
+        working-directory: mobile
+        run: |
+          flutter pub get
+          # A pubspec stripped of its dependencies still resolves
+          # "successfully" — it just installs nothing, and the failure only
+          # surfaces later as hundreds of unresolved imports. Assert that a
+          # package which must be present actually is.
+          test -f .dart_tool/package_config.json \
+            || { echo "::error::pub get produced no package_config"; exit 1; }
+          for pkg in flutter_riverpod dio google_maps_flutter intl; do
+            grep -q "\"$pkg\"" .dart_tool/package_config.json \
+              || { echo "::error::$pkg missing - pubspec was clobbered"; exit 1; }
+          done
+          echo "dependency resolution OK"
+          echo "--- resolved versions ---"
+          flutter pub deps --style=compact --no-dev 2>/dev/null | head -30
+
+      # Catches a missing cross-file import in under a second, before Gradle
+      # spends two minutes discovering the same thing. This is a hard failure:
+      # an unresolved symbol will not compile, so there is nothing to gain
+      # from continuing.
+      - name: Check cross-file symbols
+        working-directory: mobile
+        run: python3 tool/check_symbols.py
+
+      # Replaces Flutter's default icon on both apps. Runs after pub get so
+      # the package is available, and before the builds so both APKs carry it.
+      - name: Generate launcher icons
+        working-directory: mobile
+        run: dart run flutter_launcher_icons
+
+      # Reported but not gate-keeping: this is the first CI run of code that
+      # was never compiled locally, and a blocked pipeline would hide the
+      # analyzer output behind a failed job.
+      - name: Analyze
+        working-directory: mobile
+        continue-on-error: true
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings 2>&1 | tee analyze.txt
+
+      # Each app gets its own applicationId. Sharing one means Android treats
+      # the second install as an upgrade of the first, so installing the
+      # driver app silently REPLACES the rider app on the same handset.
+      # Push notifications are optional. FIREBASE_* secrets come from the
+      # client's Firebase project; when unset the apps build and run without
+      # push (see mobile/lib/core/push/push_service.dart).
+      - name: Build rider APK
+        working-directory: mobile
+        run: |
+          python3 tool/set_app_identity.py rider
+          flutter build apk --release \
+            -t lib/main_rider.dart \
+            --dart-define=FIREBASE_API_KEY=${{ secrets.FIREBASE_API_KEY }} \
+            --dart-define=FIREBASE_APP_ID=${{ secrets.FIREBASE_ANDROID_APP_ID_RIDER }} \
+            --dart-define=FIREBASE_MESSAGING_SENDER_ID=${{ secrets.FIREBASE_MESSAGING_SENDER_ID }} \
+            --dart-define=FIREBASE_PROJECT_ID=${{ secrets.FIREBASE_PROJECT_ID }} \
+            --dart-define=API_BASE_URL=${{ vars.API_BASE_URL || 'https://kwema-ride-kenya-api.up.railway.app' }}
+          mv build/app/outputs/flutter-apk/app-release.apk kwema-rider.apk
+
+      - name: Build driver APK
+        working-directory: mobile
+        run: |
+          python3 tool/set_app_identity.py driver
+          flutter build apk --release \
+            -t lib/main_driver.dart \
+            --dart-define=FIREBASE_API_KEY=${{ secrets.FIREBASE_API_KEY }} \
+            --dart-define=FIREBASE_APP_ID=${{ secrets.FIREBASE_ANDROID_APP_ID_DRIVER }} \
+            --dart-define=FIREBASE_MESSAGING_SENDER_ID=${{ secrets.FIREBASE_MESSAGING_SENDER_ID }} \
+            --dart-define=FIREBASE_PROJECT_ID=${{ secrets.FIREBASE_PROJECT_ID }} \
+            --dart-define=API_BASE_URL=${{ vars.API_BASE_URL || 'https://kwema-ride-kenya-api.up.railway.app' }}
+          mv build/app/outputs/flutter-apk/app-release.apk kwema-driver.apk
+
+      - name: Verify distinct package ids
+        working-directory: mobile
+        run: |
+          ls -lh kwema-*.apk
+          AAPT=$(find "$ANDROID_HOME/build-tools" -name aapt2 | head -1)
+          if [ -n "$AAPT" ]; then
+            for f in kwema-rider.apk kwema-driver.apk; do
+              echo "$f: $($AAPT dump packagename $f 2>/dev/null || echo '?')"
+            done
+            R=$($AAPT dump packagename kwema-rider.apk 2>/dev/null)
+            D=$($AAPT dump packagename kwema-driver.apk 2>/dev/null)
+            if [ -n "$R" ] && [ "$R" = "$D" ]; then
+              echo "::error::both APKs share package id $R - they cannot coexist"
+              exit 1
+            fi
+          fi
+
+      # Artifacts are kept even when the release step is skipped, so a
+      # workflow_dispatch run without a tag still produces something usable.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apks
+          path: |
+            mobile/kwema-rider.apk
+            mobile/kwema-driver.apk
+            mobile/analyze.txt
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag || github.ref_name }}
+          name: Kwema Ride Kenya ${{ github.event.inputs.release_tag || github.ref_name }}
+          body: |
+            Rider and driver apps for Android.
+
+            **Installing:** Android will warn about installing outside the
+            Play Store. Allow "Install unknown apps" for your browser, then
+            open the downloaded file.
+
+            These builds are signed with a debug key, which is fine for
+            direct distribution but cannot be uploaded to the Play Store.
+            A release keystore is needed for that.
+          files: |
+            mobile/kwema-rider.apk
+            mobile/kwema-driver.apk
+          fail_on_unmatched_files: true

@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Kwema Ride Kenya — The price you see is the price you pay</title>
+<meta name="description" content="Bodaboda, tuk-tuks and cars in Kenya. Full price before you ride. Pay with M-Pesa or Airtel Money, card or cash.">
+<meta name="theme-color" content="#131A3D">
+<meta property="og:title" content="Kwema Ride Kenya">
+<meta property="og:description" content="The price you see is the price you pay. Bodaboda, tuk-tuks and cars in Kenya.">
+<meta property="og:type" content="website">
+<meta property="og:image" content="/brand/icon-512.png">
+
+<link rel="icon" href="/brand/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="/brand/icon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="/brand/icon-16.png">
+<link rel="apple-touch-icon" href="/brand/icon-180.png">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<div class="notice" data-i18n="notice">Preview release — fares are illustrative until the official rates are confirmed.</div>
+
+<header>
+  <div class="shell nav">
+    <a href="/" class="brand">
+      <svg viewBox="0 0 100 100" aria-hidden="true">
+        <defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#3A4BB8"/><stop offset="1" stop-color="#1C2557"/>
+        </linearGradient></defs>
+        <rect width="100" height="100" rx="22" fill="url(#g)"/>
+        <g stroke="#fff" stroke-width="9.5" stroke-linecap="round" fill="none"><path d="M33 27 V73"/><path d="M33 50 L68 29"/><path d="M33 50 L70 73"/></g><circle cx="68" cy="29" r="8.5" fill="#E39B1F"/>
+      </svg>
+      <span class="brand-stack">Kwema Ride
+        <span class="motto-top" data-i18n="foot.motto">Fast, secure and prompt.</span>
+      </span>
+    </a>
+    <nav class="nav-links">
+      <a href="#services" data-i18n="nav.services">Services</a>
+      <a href="#fleet" data-i18n="nav.rides">Rides</a>
+      <a href="#pay" data-i18n="nav.pay">Payments</a>
+      <a href="#drive" data-i18n="nav.drive">Drive with us</a>
+      <a href="#get" data-i18n="nav.download">Get the app</a>
+      <a href="/book.html" class="btn btn-primary btn-sm" data-i18n="nav.book">Book a ride</a>
+    </nav>
+  </div>
+</header>
+
+<!-- The board is the hero. The product is a firm price, so the page opens
+     with prices for real routes rather than a phone in someone's hand. -->
+<section class="hero">
+  <div class="shell">
+    <div class="hero-grid">
+      <div>
+        <h1 data-i18n="hero.title">The price you see is the price you pay.</h1>
+        <p class="lede" data-i18n="hero.lede">No haggling at the roadside. Pick a bodaboda, bajaji or car, see the full fare, and the nearest driver comes to you.</p>
+        <div class="hero-actions">
+          <a href="/book.html" class="btn btn-light" data-i18n="hero.cta">Book a ride</a>
+          <a href="#get" class="btn btn-line" data-i18n="hero.cta2">Get the app</a>
+        </div>
+      </div>
+
+      <div class="board" id="board">
+        <div class="board-top">
+          <span class="dot"></span>
+          <span class="t" data-i18n="board.title">Journey times</span>
+        </div>
+        <div class="route">
+          <div class="route-line"><span class="pip a"></span><span class="nm" id="from">Posta</span></div>
+          <div class="route-rail"></div>
+          <div class="route-line"><span class="pip b"></span><span class="nm" id="to">Mlimani City</span></div>
+          <div class="route-meta" id="meta">13.0 km</div>
+        </div>
+        <div class="fares" id="fares"></div>
+        <div class="board-note" data-i18n="board.note">You see the full fare in the app before you request.</div>
+      </div>
+    </div>
+
+    <div class="hero-foot">
+      <span class="chip" data-i18n="chip.pay">M-Pesa · Airtel Money</span>
+      <span class="chip" data-i18n="chip.card">Visa and Mastercard</span>
+      <span class="chip" data-i18n="chip.cash">Cash</span>
+      <span class="chip" data-i18n="chip.lang">English · Kiswahili</span>
+    </div>
+  </div>
+</section>
+
+<!-- Fleet as a rate table: people compare capacity against price, and a table
+     answers that better than four identical cards. -->
+
+<!-- Three products, one dispatch pool. Worth stating plainly: the same
+     courier who takes a passenger takes a parcel, which is why coverage is
+     the same for all three. -->
+<section class="band band-sand" id="services">
+  <div class="shell">
+    <div class="head">
+      <h2 data-i18n="services.title">Rides, parcels and food</h2>
+      <p data-i18n="services.sub">One platform. A person, a parcel or a meal — the same nearby driver.</p>
+    </div>
+    <div class="svc-grid">
+      <div class="svc">
+        <div class="svc-bar" style="background:var(--car)"></div>
+        <h3 data-i18n="service.ride">Ride</h3>
+        <p data-i18n="services.ride">Travel yourself by bodaboda, bajaji or car.</p>
+      </div>
+      <div class="svc">
+        <div class="svc-bar" style="background:var(--boda)"></div>
+        <h3 data-i18n="service.parcel">Parcel</h3>
+        <p data-i18n="services.parcel">Send documents or goods across town in minutes, not days.</p>
+      </div>
+      <div class="svc">
+        <div class="svc-bar" style="background:var(--bajaji)"></div>
+        <h3 data-i18n="service.food">Food</h3>
+        <p data-i18n="services.food">Collect the meal you ordered and get it while it is still hot.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="band" id="fleet">
+  <div class="shell">
+    <div class="head">
+      <h2 data-i18n="fleet.title">Pick what suits the trip</h2>
+      <p data-i18n="fleet.sub">From a bodaboda that slips through traffic to a car with room for everyone.</p>
+    </div>
+    <div class="fleet">
+      <div class="fleet-row">
+        <span class="swatch" style="background:var(--boda)"></span>
+        <div><div class="name">Bodaboda</div>
+          <div class="desc" data-i18n="fleet.boda">Fastest through heavy traffic. Helmet provided.</div></div>
+        <div class="cap" data-i18n="fleet.boda.cap">1 passenger</div>
+        <div class="cap" data-i18n="fleet.boda.note">Short hops</div>
+      </div>
+      <div class="fleet-row">
+        <span class="swatch" style="background:var(--bajaji)"></span>
+        <div><div class="name">Bajaji</div>
+          <div class="desc" data-i18n="fleet.bajaji">Cheaper, and covered against sun and rain.</div></div>
+        <div class="cap" data-i18n="fleet.bajaji.cap">2–3 people</div>
+        <div class="cap" data-i18n="fleet.bajaji.note">Nearby streets</div>
+      </div>
+      <div class="fleet-row">
+        <span class="swatch" style="background:var(--car)"></span>
+        <div><div class="name" data-i18n="fleet.car.name">Car</div>
+          <div class="desc" data-i18n="fleet.car">Air conditioned, with boot space for luggage.</div></div>
+        <div class="cap" data-i18n="fleet.car.cap">4 people</div>
+        <div class="cap" data-i18n="fleet.car.note">Everyday</div>
+      </div>
+      <div class="fleet-row">
+        <span class="swatch" style="background:#2E9E5B"></span>
+        <div><div class="name" data-i18n="fleet.electric.name">Electric</div>
+          <div class="desc" data-i18n="fleet.electric">Electric bodaboda, bajaji and cars — lower fares, no fumes.</div></div>
+        <div class="cap" data-i18n="fleet.electric.cap">3 types</div>
+        <div class="cap" data-i18n="fleet.electric.note">Cheaper per km</div>
+      </div>
+      <div class="fleet-row">
+        <span class="swatch" style="background:var(--xl)"></span>
+        <div><div class="name" data-i18n="fleet.xl.name">Car XL</div>
+          <div class="desc" data-i18n="fleet.xl">Room for airport luggage or the whole family.</div></div>
+        <div class="cap" data-i18n="fleet.xl.cap">6–7 people</div>
+        <div class="cap" data-i18n="fleet.xl.note">Airport runs</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- A journey has stops, so the sequence is drawn as one. -->
+<section class="band band-sand">
+  <div class="shell">
+    <div class="head"><h2 data-i18n="how.title">Three stops</h2></div>
+    <div class="journey">
+      <div class="stop"><div class="pip">1</div>
+        <div><h3 data-i18n="how.1.t">Set your destination</h3>
+        <p data-i18n="how.1.p">Type where you are going. You see the fare for every vehicle before you request.</p></div></div>
+      <div class="stop"><div class="pip">2</div>
+        <div><h3 data-i18n="how.2.t">A driver comes to you</h3>
+        <p data-i18n="how.2.p">We find the nearest one. Follow them on the map until they arrive.</p></div></div>
+      <div class="stop"><div class="pip">3</div>
+        <div><h3 data-i18n="how.3.t">Pay your way</h3>
+        <p data-i18n="how.3.p">Mobile money, card or cash. The fare is the one you saw at the start.</p></div></div>
+    </div>
+  </div>
+</section>
+
+<section class="band" id="pay">
+  <div class="shell">
+    <div class="head">
+      <h2 data-i18n="pay.title">Three ways to pay</h2>
+      <p data-i18n="pay.sub">Choose before the trip. None of them costs extra.</p>
+    </div>
+    <div class="pays">
+      <div class="pay">
+        <h3 data-i18n="pay.mm.t">Mobile money</h3>
+        <p data-i18n="pay.mm.p">A prompt arrives on your phone. Enter your PIN and it is done — no hunting for change.</p>
+        <div class="nets"><span>M-Pesa</span><span>Airtel Money</span></div>
+      </div>
+      <div class="pay">
+        <h3 data-i18n="pay.card.t">Card</h3>
+        <p data-i18n="pay.card.p">Visa and Mastercard, with your bank’s 3-D Secure check.</p>
+        <div class="nets"><span>Visa</span><span>Mastercard</span></div>
+      </div>
+      <div class="pay">
+        <h3 data-i18n="pay.cash.t">Cash</h3>
+        <p data-i18n="pay.cash.p">Pay the driver directly at the end. Same fare either way.</p>
+        <div class="nets"><span data-i18n="pay.cash.tag">Same price</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="band band-dark" id="drive">
+  <div class="shell driver-grid">
+    <div>
+      <h2 data-i18n="drive.title">Drive with Kwema</h2>
+      <p style="color:var(--lk-100);font-size:18px;margin-top:16px;max-width:42ch" data-i18n="drive.sub">Bodaboda, bajaji or car. You see what you earn before you accept each trip.</p>
+      <ul class="reqs">
+        <li><span class="tick">✓</span><span data-i18n="drive.1">Valid driving licence</span></li>
+        <li><span class="tick">✓</span><span data-i18n="drive.2">Transport operator licence</span></li>
+        <li><span class="tick">✓</span><span data-i18n="drive.3">Current vehicle insurance</span></li>
+        <li><span class="tick">✓</span><span data-i18n="drive.4">National ID card</span></li>
+      </ul>
+      <a href="#apply" class="btn btn-mg" style="margin-top:30px" data-i18n="drive.cta">Sign up to drive</a>
+    </div>
+    <div class="earn">
+      <div class="row"><span class="k" data-i18n="earn.fare">Trip fare</span>
+        <span class="v">100%</span></div>
+      <div class="row"><span class="k" data-i18n="earn.commission">Kwema commission</span>
+        <span class="v">− 15%</span></div>
+      <div class="row"><span class="k" data-i18n="earn.take">You keep</span>
+        <span class="v mg">85%</span></div>
+      <p style="color:var(--lk-100);font-size:14.5px;margin-top:18px;line-height:1.6"
+         data-i18n="earn.note">On cash trips the money stays in your hand — only the commission comes back to us.</p>
+    </div>
+  </div>
+</section>
+
+
+<!-- Applying takes three fields. Documents come later, in person or in the
+     app: asking a bodaboda rider to photograph a licence on a roadside form
+     is how you lose the applicant. -->
+<section class="band" id="apply">
+  <div class="shell apply-grid">
+    <div>
+      <h2 data-i18n="apply.title">Fill the form, we will call you</h2>
+      <p style="font-size:18px;color:var(--muted);margin-top:16px;max-width:40ch"
+         data-i18n="apply.sub">Start with your name, phone and email. Documents — licence, insurance and ID card — come later.</p>
+      <ol class="apply-steps">
+        <li><span data-i18n="apply.s1">Fill in this form</span></li>
+        <li><span data-i18n="apply.s2">We call you and explain the next steps</span></li>
+        <li><span data-i18n="apply.s3">Bring your documents</span></li>
+        <li><span data-i18n="apply.s4">Start taking trips</span></li>
+      </ol>
+    </div>
+
+    <form class="apply-card" id="apply-form" novalidate>
+      <div id="apply-msg"></div>
+
+      <label for="ap-name" data-i18n="apply.name">Full name</label>
+      <input id="ap-name" name="fullName" autocomplete="name" required>
+
+      <label for="ap-phone" data-i18n="apply.phone">Phone number</label>
+      <input id="ap-phone" name="phone" value="+254" inputmode="tel"
+             autocomplete="tel" required>
+
+      <label for="ap-email" data-i18n="apply.email">Email</label>
+      <input id="ap-email" name="email" type="email" autocomplete="email">
+
+      <div class="apply-two">
+        <div>
+          <label for="ap-city" data-i18n="apply.city">City</label>
+          <input id="ap-city" name="city" placeholder="Nairobi, Mombasa, Kisumu…" autocomplete="address-level2">
+        </div>
+        <div>
+          <label for="ap-type" data-i18n="apply.vehicle">What will you drive?</label>
+          <select id="ap-type" name="vehicleType">
+            <option value="boda">Bodaboda</option>
+            <option value="bajaji">Bajaji</option>
+            <option value="standard" selected>Car</option>
+            <option value="xl">Car XL</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Honeypot: hidden from people, filled by most bots. -->
+      <div class="hp" aria-hidden="true">
+        <label for="ap-website">Website</label>
+        <input id="ap-website" name="website" tabindex="-1" autocomplete="off">
+      </div>
+
+      <label class="apply-consent">
+        <input type="checkbox" id="ap-consent" required>
+        <span data-i18n="apply.consent">I agree that Kwema may call me about this application.</span>
+      </label>
+
+      <button type="submit" class="btn btn-primary" style="width:100%;margin-top:6px"
+              id="ap-submit" data-i18n="apply.submit">Send application</button>
+    </form>
+  </div>
+</section>
+
+<section class="band band-sand" id="get">
+  <div class="shell dl-grid">
+    <div>
+      <h2 data-i18n="dl.title">Get the Kwema app</h2>
+      <p style="font-size:18px;color:var(--muted);margin-top:16px;max-width:40ch" data-i18n="dl.sub">Follow your driver on the map, save the places you go often, and pay in one tap.</p>
+      <div class="dl-tabs">
+        <button class="dl-tab on" data-dl="rider" data-i18n="dl.tab.rider">For riders</button>
+        <button class="dl-tab" data-dl="driver" data-i18n="dl.tab.driver">For drivers</button>
+      </div>
+      <div class="store-row" id="stores"></div>
+      <p class="apk-note" id="apk-note"></p>
+    </div>
+    <div>
+      <div class="phone">
+        <div class="screen">
+          <div style="background:var(--lk-500);padding:14px 16px;display:flex;
+                      align-items:center;gap:9px">
+            <svg viewBox="0 0 100 100" style="width:22px;height:22px;border-radius:6px" aria-hidden="true">
+              <rect width="100" height="100" rx="22" fill="#26327A"/>
+              <g stroke="#fff" stroke-width="9.5" stroke-linecap="round" fill="none"><path d="M33 27 V73"/><path d="M33 50 L68 29"/><path d="M33 50 L70 73"/></g><circle cx="68" cy="29" r="8.5" fill="#E39B1F"/>
+            </svg>
+            <span style="color:#fff;font-weight:700;font-size:15px">Kwema Ride</span>
+          </div>
+          <div style="height:118px;background:#E8E4DC"></div>
+          <div style="padding:14px;background:#fff">
+            <div style="border:1px solid var(--line);border-radius:10px;padding:11px;
+                        font-size:13px;color:var(--muted);margin-bottom:11px">Where to?</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+              <div style="border:2px solid var(--car);background:var(--lk-50);
+                          border-radius:10px;padding:10px;text-align:center">
+                <div style="height:4px;width:22px;background:var(--car);border-radius:2px;margin:0 auto 7px"></div>
+                <div style="font-size:12px;font-weight:700">Car</div>
+                <div style="font-size:12px;color:var(--muted)">Watu 4</div></div>
+              <div style="border:1px solid var(--line);border-radius:10px;padding:10px;text-align:center">
+                <div style="height:4px;width:22px;background:var(--boda);border-radius:2px;margin:0 auto 7px"></div>
+                <div style="font-size:12px;font-weight:700">Bodaboda</div>
+                <div style="font-size:12px;color:var(--muted)">1 passenger</div></div>
+            </div>
+            <div style="background:var(--lk-500);color:#fff;text-align:center;padding:12px;
+                        border-radius:10px;font-size:13px;font-weight:700;margin-top:11px">
+              Request Car</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="shell">
+    <div class="foot-grid">
+      <div>
+        <div class="brand" style="color:#fff;margin-bottom:14px">
+          <svg viewBox="0 0 100 100" aria-hidden="true">
+            <rect width="100" height="100" rx="22" fill="#26327A"/>
+            <g stroke="#fff" stroke-width="9.5" stroke-linecap="round" fill="none"><path d="M33 27 V73"/><path d="M33 50 L68 29"/><path d="M33 50 L70 73"/></g><circle cx="68" cy="29" r="8.5" fill="#E39B1F"/>
+          </svg>
+          Kwema Ride
+        </div>
+        <p style="font-size:15px;max-width:28ch;line-height:1.6" data-i18n="foot.blurb">Getting around Kenya — bodaboda, bajaji and cars.</p>
+      </div>
+      <div><h4 data-i18n="foot.product">Product</h4>
+        <a href="#services" data-i18n="nav.services">Services</a>
+      <a href="#fleet" data-i18n="nav.rides">Rides</a>
+        <a href="#pay" data-i18n="nav.pay">Payments</a>
+        <a href="/book.html" data-i18n="nav.book">Book a ride</a></div>
+      <div><h4 data-i18n="foot.drivers">Drivers</h4>
+        <a href="#drive" data-i18n="drive.cta">Sign up to drive</a>
+        <a href="#get" data-i18n="dl.tab.driver">For drivers</a></div>
+      <div><h4 data-i18n="foot.support">Support</h4>
+        <a href="mailto:support@kwemaride.co.ke">support@kwemaride.co.ke</a>
+        <a href="/privacy" data-i18n="foot.privacy">Privacy policy</a>
+        <a href="/terms" data-i18n="foot.terms">Terms of use</a>
+        <a href="/status" data-i18n="foot.status">System status</a></div>
+    </div>
+    <div class="foot-bottom">
+      <span data-i18n="foot.copyright">© 2026 Jatelo Technologies. Kwema Ride Kenya is a Jatelo Technologies service.</span>
+      <div class="lang" id="lang"><button data-lang="en" class="on">English</button><button data-lang="sw">Kiswahili</button></div>
+    </div>
+  </div>
+</footer>
+
+<script src="/i18n.js"></script>
+<script src="/home.js"></script>
+</body>
+</html>

@@ -1,0 +1,79 @@
+# Builds the Kwema Ride Kenya rider and driver apps for iPhone (unsigned).
+#
+# Runs on a macOS runner, which GitHub bills at a higher rate than Linux, so
+# it is manual-only. It proves the apps compile for iOS and produces
+# unsigned bundles. Shipping to TestFlight / the App Store additionally needs
+# the CLIENT's Apple Developer Program account: a distribution certificate, a
+# provisioning profile per app, App Store Connect API keys, and an App Store
+# review. Those cannot be created from this repository.
+#
+# Status: written, not yet run. Expect to iterate on the first run.
+
+name: Build iOS apps (unsigned)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ios:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        app: [rider, driver]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Generate iOS platform files
+        working-directory: mobile
+        run: |
+          cp pubspec.yaml /tmp/pubspec.yaml.bak
+          cp analysis_options.yaml /tmp/analysis_options.yaml.bak
+          flutter create --platforms=ios --org com.jatelo.kwema.ke --project-name kwema --overwrite .
+          cp /tmp/pubspec.yaml.bak pubspec.yaml
+          cp /tmp/analysis_options.yaml.bak analysis_options.yaml
+          # Now that an ios/ folder exists the icon tool can write into it.
+          sed -i 's/^  ios: false/  ios: true/' pubspec.yaml
+          flutter pub get
+
+      - name: Check cross-file symbols
+        working-directory: mobile
+        run: python3 tool/check_symbols.py
+
+      - name: Launcher icons
+        working-directory: mobile
+        run: dart run flutter_launcher_icons
+
+      - name: Set identity, permissions and Maps key
+        working-directory: mobile
+        env:
+          IOS_MAPS_KEY: ${{ secrets.IOS_MAPS_API_KEY }}
+        run: python3 tool/patch_ios_project.py ${{ matrix.app }} "$IOS_MAPS_KEY"
+
+      - name: Build ${{ matrix.app }} (no codesign)
+        working-directory: mobile
+        run: |
+          if [ "${{ matrix.app }}" = "rider" ]; then
+            APP_ID="${{ secrets.FIREBASE_IOS_APP_ID_RIDER }}"
+          else
+            APP_ID="${{ secrets.FIREBASE_IOS_APP_ID_DRIVER }}"
+          fi
+          flutter build ios --release --no-codesign \
+            -t lib/main_${{ matrix.app }}.dart \
+            --dart-define=FIREBASE_API_KEY=${{ secrets.FIREBASE_API_KEY }} \
+            --dart-define=FIREBASE_APP_ID="$APP_ID" \
+            --dart-define=FIREBASE_MESSAGING_SENDER_ID=${{ secrets.FIREBASE_MESSAGING_SENDER_ID }} \
+            --dart-define=FIREBASE_PROJECT_ID=${{ secrets.FIREBASE_PROJECT_ID }} \
+            --dart-define=API_BASE_URL=${{ vars.API_BASE_URL || 'https://kwema-ride-kenya-api.up.railway.app' }}
+          cd build/ios/iphoneos && zip -qry "$GITHUB_WORKSPACE/kwema-${{ matrix.app }}-ios-unsigned.zip" Runner.app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-${{ matrix.app }}
+          path: kwema-${{ matrix.app }}-ios-unsigned.zip

@@ -1,0 +1,84 @@
+import { Injectable, BadRequestException } from '@nestjs/common';
+import { DataSource } from 'typeorm';
+import { country } from '../common/country';
+
+/** Interface languages the platform supports. Mirrors the CHECK constraint. */
+export const SUPPORTED_LANGUAGES: readonly string[] = country.languages;
+export type SupportedLanguage = string;
+
+@Injectable()
+export class UsersService {
+  constructor(private readonly db: DataSource) {}
+
+  /**
+   * Persists the interface language. This is not cosmetic on the server side:
+   * it decides what language OTP messages, push notifications and receipts go
+   * out in, which is the part the app cannot do for itself.
+   */
+  async setLanguage(userId: string, language: string) {
+    if (!SUPPORTED_LANGUAGES.includes(language as SupportedLanguage)) {
+      throw new BadRequestException(
+        `language must be one of: ${SUPPORTED_LANGUAGES.join(', ')}`,
+      );
+    }
+
+    const [row] = await this.db.query(
+      `UPDATE users SET preferred_language = $2
+        WHERE id = $1 AND deleted_at IS NULL
+        RETURNING id, preferred_language`,
+      [userId, language],
+    );
+
+    if (!row) throw new BadRequestException('user_not_found');
+    return { language: row.preferred_language };
+  }
+
+  /**
+   * Sets the display name.
+   *
+   * This is what a driver sees on an incoming request and what a rider sees
+   * on the trip screen, so it is worth validating: an empty or one-character
+   * name makes the trip screen useless for both sides.
+   */
+  async setName(userId: string, fullName: string) {
+    const trimmed = fullName.trim().replace(/\s+/g, ' ');
+    if (trimmed.length < 2 || trimmed.length > 120) {
+      throw new BadRequestException('name must be 2-120 characters');
+    }
+
+    const [row] = await this.db.query(
+      `UPDATE users SET full_name = $2
+        WHERE id = $1 AND deleted_at IS NULL
+        RETURNING id`,
+      [userId, trimmed],
+    );
+    if (!row) throw new BadRequestException('user_not_found');
+    return this.profile(userId);
+  }
+
+  async profile(userId: string) {
+    const [row] = await this.db.query(
+      `SELECT u.id, u.phone, u.full_name, u.preferred_language,
+              u.rating_avg, u.rating_count, u.created_at, u.photo_key,
+              d.id AS driver_id, d.state AS driver_state
+         FROM users u
+         LEFT JOIN drivers d ON d.user_id = u.id
+        WHERE u.id = $1 AND u.deleted_at IS NULL`,
+      [userId],
+    );
+    if (!row) throw new BadRequestException('user_not_found');
+
+    return {
+      id: row.id,
+      phone: row.phone,
+      fullName: row.full_name,
+      photoUrl: row.photo_key ? `/api/photos/${row.photo_key}` : null,
+      language: row.preferred_language,
+      rating: Number(row.rating_avg),
+      ratingCount: Number(row.rating_count),
+      isDriver: Boolean(row.driver_id),
+      driverState: row.driver_state ?? null,
+      memberSince: row.created_at,
+    };
+  }
+}

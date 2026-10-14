@@ -1,0 +1,78 @@
+name: kwema
+description: Kwema Ride Kenya — rider and driver apps.
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: '>=3.4.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+
+  # State management. Riverpod over Provider/Bloc mainly because the driver
+  # app needs the same controllers alive outside the widget tree — location
+  # streaming continues while the UI is backgrounded.
+  flutter_riverpod: ^2.5.1
+
+  # Maps and location
+  google_maps_flutter: ^2.9.0
+  geolocator: ^13.0.2
+
+  # Networking
+  dio: ^5.7.0
+  socket_io_client: ^2.0.3+1
+
+  # Storage. sqflite backs the offline location buffer; shared_preferences
+  # holds the language choice and session tokens.
+  sqflite: ^2.4.1
+  shared_preferences: ^2.3.3
+  flutter_secure_storage: ^9.2.2
+
+  # Camera and gallery, for profile photos, so a rider can see the driver's
+  # photo before getting in.
+  image_picker: ^1.1.2
+
+  # UI
+  google_fonts: ^6.2.1
+  # Must track whatever flutter_localizations pins; the SDK constraint wins.
+  intl: ^0.20.3
+  url_launcher: ^6.3.1
+
+  # Push notifications. Configured at build time through --dart-define (see
+  # lib/core/push/push_service.dart); inert until the client's Firebase
+  # project values are supplied.
+  firebase_core: ^3.8.0
+  firebase_messaging: ^15.1.6
+
+  # Card payments open the provider's hosted 3-D Secure page via url_launcher
+  # in an external browser rather than an in-app WebView. Card fields are
+  # never rendered by this app either way, which is what keeps it out of
+  # PCI DSS scope.
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+  flutter_launcher_icons: ^0.14.2
+
+# Launcher icons are generated from a single square source at build time.
+# The source is unrounded on purpose: Android and iOS apply their own mask,
+# and pre-rounding leaves a visible double corner.
+flutter_launcher_icons:
+  android: true
+  # iOS is false because CI runs `flutter create --platforms=android`, so no
+  # ios/ directory exists for the tool to write into — it fails hard rather
+  # than skipping. Set this to true at the same time you add an iOS build.
+  ios: false
+  image_path: assets/icon/icon.png
+  adaptive_icon_background: "#3A4BB8"
+  adaptive_icon_foreground: assets/icon/icon_foreground.png
+  remove_alpha_ios: true
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/icon/
