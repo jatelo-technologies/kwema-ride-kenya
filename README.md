@@ -1,6 +1,6 @@
 # Kwema Ride Kenya
 
-Ride-hailing, parcel and food delivery for Kenya: bodabodas, bajajis, cars and XL/Express vehicles,
+Ride-hailing, parcel and food delivery for Kenya: bodabodas, tuk-tuks, cars and XL/Express vehicles,
 with mobile money, card and cash payments, apps in English and Swahili, and a firm
 price before every trip.
 

@@ -45,7 +45,7 @@
     { from: "South B", to: "Industrial Area", km: 5.0 },
   ];
 
-  const TIER_NAMES = {"en": {"boda": "Bodaboda", "bajaji": "Bajaji", "standard": "Car", "xl": "Car XL"}, "sw": {"boda": "Bodaboda", "bajaji": "Bajaji", "standard": "Gari", "xl": "Gari Kubwa"}, "fr": {"boda": "Moto-taxi", "bajaji": "Tuk-tuk", "standard": "Voiture", "xl": "Voiture XL"}, "rw": {"boda": "Moto", "bajaji": "Tuk-tuk", "standard": "Imodoka", "xl": "Imodoka XL"}, "lg": {"boda": "Bodaboda", "bajaji": "Tuk-tuk", "standard": "Mmotoka", "xl": "Mmotoka XL"}};
+  const TIER_NAMES = {"en": {"boda": "Bodaboda", "bajaji": "Tuk-tuk", "standard": "Car", "xl": "Car XL"}, "sw": {"boda": "Bodaboda", "bajaji": "Tuk-tuk", "standard": "Gari", "xl": "Gari Kubwa"}, "fr": {"boda": "Moto-taxi", "bajaji": "Tuk-tuk", "standard": "Voiture", "xl": "Voiture XL"}, "rw": {"boda": "Moto", "bajaji": "Tuk-tuk", "standard": "Imodoka", "xl": "Imodoka XL"}, "lg": {"boda": "Bodaboda", "bajaji": "Tuk-tuk", "standard": "Mmotoka", "xl": "Mmotoka XL"}};
   const TIER_KEY = TIER_NAMES.en;
 
   let index = 0;

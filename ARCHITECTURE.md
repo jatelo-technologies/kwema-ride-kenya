@@ -1,7 +1,7 @@
 # Kwema Ride Kenya — platform architecture
 
 A production architecture for a multi-tier ride-hailing service covering
-bodabodas, bajajis, cars and XL/Express vehicles in Kenya. The same design serves Kwema Ride Kenya,
+bodabodas, tuk-tuks, cars and XL/Express vehicles in Kenya. The same design serves Kwema Ride Kenya,
 Uganda and Rwanda; what differs per country lives in `src/common/country.ts`
 (phone format, currency, rounding, VAT, timezone, map bounds, wallets,
 languages, emergency numbers) and in the seeded zones and tariffs.

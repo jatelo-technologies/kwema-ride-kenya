@@ -498,7 +498,7 @@
     // Green for the electric tiers, so the distinction registers before the
     // label is read.
     e_boda: '#2E9E5B', e_bajaji: '#1E8E63', e_car: '#17806E' };
-  const CAT_NAME = {"en": {"boda": "Bodaboda", "bajaji": "Bajaji", "standard": "Car", "xl": "Car XL", "express": "Express", "e_boda": "Electric Bodaboda", "e_bajaji": "Electric Bajaji", "e_car": "Electric Car"}, "sw": {"boda": "Bodaboda", "bajaji": "Bajaji", "standard": "Gari", "xl": "Gari Kubwa", "express": "Express", "e_boda": "Boda ya Umeme", "e_bajaji": "Bajaji ya Umeme", "e_car": "Gari la Umeme"}, "fr": {"boda": "Moto-taxi", "bajaji": "Tuk-tuk", "standard": "Voiture", "xl": "Voiture XL", "express": "Express", "e_boda": "Moto-taxi électrique", "e_bajaji": "Tuk-tuk électrique", "e_car": "Voiture électrique"}};
+  const CAT_NAME = {"en": {"boda": "Bodaboda", "bajaji": "Tuk-tuk", "standard": "Car", "xl": "Car XL", "express": "Express", "e_boda": "Electric Bodaboda", "e_bajaji": "Electric Tuk-tuk", "e_car": "Electric Car"}, "sw": {"boda": "Bodaboda", "bajaji": "Tuk-tuk", "standard": "Gari", "xl": "Gari Kubwa", "express": "Express", "e_boda": "Boda ya Umeme", "e_bajaji": "Tuk-tuk ya Umeme", "e_car": "Gari la Umeme"}, "fr": {"boda": "Moto-taxi", "bajaji": "Tuk-tuk", "standard": "Voiture", "xl": "Voiture XL", "express": "Express", "e_boda": "Moto-taxi électrique", "e_bajaji": "Tuk-tuk électrique", "e_car": "Voiture électrique"}};
 
   function poolBlock() {
     if (!poolOffered()) { state.pool = 'off'; return ''; }

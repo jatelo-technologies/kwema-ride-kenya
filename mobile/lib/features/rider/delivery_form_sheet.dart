@@ -147,8 +147,8 @@ class _DeliveryFormSheetState extends ConsumerState<DeliveryFormSheet> {
               _size == 'large'
                   ? 'Gari tu'
                   : _size == 'medium'
-                      ? 'Bajaji au gari'
-                      : 'Bodaboda, bajaji au gari',
+                      ? 'Tuk-tuk au gari'
+                      : 'Bodaboda, tuk-tuk au gari',
               style: theme.textTheme.bodySmall,
             ),
 
