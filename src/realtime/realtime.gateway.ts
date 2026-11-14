@@ -39,6 +39,7 @@ import { DispatchService, VehicleCategory } from '../dispatch/dispatch.service';
 import { RidesService } from '../rides/rides.service';
 import { WsThrottleGuard } from '../common/guards/ws-throttle.guard';
 import { REDIS } from '../common/redis.module';
+import { MessagesService } from '../messages/messages.service';
 
 // ---------------------------------------------------------------------
 // Wire contracts
@@ -54,6 +55,8 @@ interface AuthedSocket extends Socket {
     lastSeq: number;
     /** Rides this socket is authorised to receive events for. */
     rooms: Set<string>;
+    /** Driver has asked to be available (cleared by driver:go_offline). */
+    available?: boolean;
   };
 }
 
@@ -97,6 +100,8 @@ export class RealtimeGateway implements OnGatewayInit, OnGatewayConnection, OnGa
     @Inject(forwardRef(() => RidesService))
     private readonly rides: RidesService,
     @Inject(REDIS) private readonly redis: Redis,
+    @Inject(forwardRef(() => MessagesService))
+    private readonly messages: MessagesService,
   ) {}
 
   // =====================================================================
@@ -126,11 +131,18 @@ export class RealtimeGateway implements OnGatewayInit, OnGatewayConnection, OnGa
           throw new Error('revoked token');
         }
 
+        // Tokens issued before the category was added to them (or for a
+        // driver whose vehicle changed) are repaired from the database.
+        let category = payload.category as VehicleCategory | undefined;
+        if (payload.driverId && !category) {
+          category = await this.dispatch.vehicleCategoryOf(payload.driverId);
+        }
+
         const s = socket as AuthedSocket;
         s.data = {
           userId: payload.sub,
           driverId: payload.driverId,
-          category: payload.category,
+          category,
           role: payload.role,
           lastHeardAt: Date.now(),
           lastSeq: 0,
@@ -151,6 +163,10 @@ export class RealtimeGateway implements OnGatewayInit, OnGatewayConnection, OnGa
 
     // Personal room: lets us push to a user across all their devices.
     await socket.join(`user:${userId}`);
+
+    // Offers are addressed to the driver, not the user, so they reach the
+    // driver's app on whichever device it is open.
+    if (driverId) await socket.join(`driver:${driverId}`);
 
     // Administrators also join the operations room, which is where emergency
     // alerts land. An SOS has to reach a human immediately; polling would add
@@ -207,6 +223,7 @@ export class RealtimeGateway implements OnGatewayInit, OnGatewayConnection, OnGa
     if (!driverId || !category) throw new WsException('not a driver session');
 
     socket.data.lastHeardAt = Date.now();
+    socket.data.available = true;
 
     // Drop replays and out-of-order deliveries. When a device drains its
     // offline buffer it may send seq 41..58 while the live stream is at 60;
@@ -226,6 +243,7 @@ export class RealtimeGateway implements OnGatewayInit, OnGatewayConnection, OnGa
 
     if (!isStale) {
       await this.dispatch.upsertDriverPosition(driverId, category, lat, lng);
+      await this.dispatch.markPresence(driverId, lat, lng);
       await this.redis.hset(`driver:${driverId}`, {
         lat: lat.toString(),
         lng: lng.toString(),
@@ -250,15 +268,24 @@ export class RealtimeGateway implements OnGatewayInit, OnGatewayConnection, OnGa
       isBackfilled: ping.b === true,
     });
 
-    // Only the rider on this trip sees the driver move.
-    if (ping.r && !isStale) {
-      socket.to(`ride:${ping.r}`).emit('ride:driver_moved', {
-        la: ping.la,
-        ln: ping.ln,
-        h: ping.h,
-        s: ping.s,
-        t: ping.t,
-      });
+    // Only the riders on this vehicle's trips see the driver move.
+    //
+    // The ride id on a ping is only a hint: the driver app has not always
+    // known it yet (before pickup, or just after accepting), and a rider
+    // watching "driver on the way" got nothing. The server therefore works
+    // out the vehicle's open rides itself, cached for a few seconds so a
+    // ping never costs a query. Each rider receives the ride id with the
+    // position, so a rider with several rides open can tell which is which.
+    if (!isStale) {
+      const rideIds = new Set<string>();
+      if (ping.r) rideIds.add(ping.r);
+      for (const id of await this.redis.smembers(`pool:driver:${driverId}:rides`)) rideIds.add(id);
+      for (const id of await this.openRideIds(driverId)) rideIds.add(id);
+      for (const rid of rideIds) {
+        socket.to(`ride:${rid}`).emit('ride:driver_moved', {
+          rid, la: ping.la, ln: ping.ln, h: ping.h, s: ping.s, t: ping.t,
+        });
+      }
     }
 
     // The ack doubles as the client's round-trip and clock-skew probe.
@@ -306,6 +333,18 @@ export class RealtimeGateway implements OnGatewayInit, OnGatewayConnection, OnGa
     return { ok: true, rideId: ride.id, reference: ride.reference };
   }
 
+  private openRidesCache = new Map<string, { at: number; ids: string[] }>();
+
+  /** Rides this driver is carrying or heading to, cached for 4 seconds. */
+  private async openRideIds(driverId: string): Promise<string[]> {
+    const hit = this.openRidesCache.get(driverId);
+    if (hit && Date.now() - hit.at < 4000) return hit.ids;
+    const rows = await this.rides.openRideIdsForDriver(driverId);
+    this.openRidesCache.set(driverId, { at: Date.now(), ids: rows });
+    if (this.openRidesCache.size > 5000) this.openRidesCache.clear();
+    return rows;
+  }
+
   // =====================================================================
   // ride:accept  (driver → server)
   // =====================================================================
@@ -321,6 +360,8 @@ export class RealtimeGateway implements OnGatewayInit, OnGatewayConnection, OnGa
     // The offer token is a short-lived HMAC issued with the offer. It stops a
     // driver from accepting a ride they were never offered by replaying an id.
     const claimed = await this.rides.claim(body.rideId, driverId, body.offerToken);
+    // The vehicle's open rides just changed; the next ping must see that.
+    this.openRidesCache.delete(driverId);
     if (!claimed) {
       // Almost always a benign race: another driver won a second earlier.
       socket.emit('ride:offer_closed', { rideId: body.rideId, reason: 'taken' });
@@ -330,16 +371,37 @@ export class RealtimeGateway implements OnGatewayInit, OnGatewayConnection, OnGa
     await socket.join(`ride:${body.rideId}`);
     socket.data.rooms.add(`ride:${body.rideId}`);
 
-    // Everyone on the trip gets the same payload from the same source of truth.
-    this.server.to(`ride:${body.rideId}`).emit('ride:status_change', {
-      rideId: body.rideId,
+    const accepted = {
       status: 'accepted',
       driver: claimed.driverPublicProfile,
       vehicle: claimed.vehicle,
       etaSeconds: claimed.etaSeconds,
       at: Date.now(),
+    };
+
+    // Everyone on the trip gets the same payload from the same source of truth.
+    this.server.to(`ride:${body.rideId}`).emit('ride:status_change', {
+      rideId: body.rideId,
+      ...accepted,
     });
     void this.rides.notifyRider(body.rideId, 'accepted');
+
+    // Car pooling. Riders who were waiting on this trip now have their
+    // driver, and the driver's app is told about every rider it just took on.
+    const pool = claimed.pool;
+    if (pool) {
+      for (const rideId of pool.attachedRideIds) {
+        await socket.join(`ride:${rideId}`);
+        socket.data.rooms.add(`ride:${rideId}`);
+        this.server.to(`ride:${rideId}`).emit('ride:status_change', { rideId, ...accepted });
+      }
+      const added = pool.joinedExisting ? [body.rideId] : pool.attachedRideIds;
+      for (const rideId of added) {
+        const payload = await this.rides.poolRiderPayload(rideId);
+        if (payload) socket.emit('pool:rider_added', payload);
+      }
+      await this.rides.broadcastPoolCount(pool.tripId);
+    }
 
     return { ok: true };
   }
@@ -372,6 +434,7 @@ export class RealtimeGateway implements OnGatewayInit, OnGatewayConnection, OnGa
     // 'completed' after a reconnect must not close a trip twice, and the
     // fare is computed here, never trusted from the device.
     const updated = await this.rides.transition(body.rideId, driverId, body.status, new Date(body.at));
+    this.openRidesCache.delete(driverId);
 
     this.server.to(`ride:${body.rideId}`).emit('ride:status_change', this.rides.toWireSummary(updated));
     void this.rides.notifyRider(body.rideId, body.status);
@@ -383,6 +446,8 @@ export class RealtimeGateway implements OnGatewayInit, OnGatewayConnection, OnGa
         distanceM: updated.actualDistanceM,
         durationS: updated.actualDurationS,
         paymentMethod: updated.paymentMethod,
+        poolDiscountCents: Number(updated.pool_discount_cents ?? 0),
+        poolSharedWith: Number(updated.pool_shared_with ?? 0),
       });
     }
 
@@ -398,9 +463,65 @@ export class RealtimeGateway implements OnGatewayInit, OnGatewayConnection, OnGa
    * time so the app can correct clock skew — Android devices in the field
    * are routinely minutes off, which would otherwise corrupt trip timestamps.
    */
+  /**
+   * In-app audio call signalling (WebRTC). The server only relays small
+   * control messages between the two people on a live trip; audio itself goes
+   * peer to peer (or through the TURN relay). A signal for any ride the sender
+   * is not on, or one that is no longer live, is dropped.
+   */
+  @UseGuards(WsThrottleGuard)
+  @SubscribeMessage('call:signal')
+  async onCallSignal(
+    @ConnectedSocket() socket: AuthedSocket,
+    @MessageBody() body: { rideId: string; type: string; data?: unknown },
+  ) {
+    const allowed = ['invite', 'accept', 'reject', 'busy', 'offer', 'answer', 'ice', 'end'];
+    if (!body?.rideId || !allowed.includes(body.type)) return { ok: false };
+    // 'end' is always relayed to the counterpart even after the trip closes,
+    // so a call cannot be left ringing on the other side.
+    const peer = await this.messages.liveCounterpart(body.rideId, socket.data.userId);
+    if (!peer) {
+      if (body.type === 'end') return { ok: true };
+      return { ok: false, reason: 'not_live' };
+    }
+    this.server.to(`user:${peer}`).emit('call:signal', {
+      rideId: body.rideId,
+      type: body.type,
+      data: body.data ?? null,
+      from: socket.data.userId,
+    });
+    return { ok: true };
+  }
+
+  /** The driver pressed "go offline": leave the pool now, not in 90 seconds. */
+  @SubscribeMessage('driver:go_offline')
+  async onGoOffline(@ConnectedSocket() socket: AuthedSocket) {
+    const { driverId, category } = socket.data;
+    if (!driverId) throw new WsException('not a driver session');
+    socket.data.available = false;
+    await this.dispatch.setOffline(driverId, category);
+    return { ok: true };
+  }
+
   @SubscribeMessage('hb')
-  onHeartbeat(@ConnectedSocket() socket: AuthedSocket, @MessageBody() body: { t: number }) {
+  async onHeartbeat(@ConnectedSocket() socket: AuthedSocket, @MessageBody() body: { t: number }) {
     socket.data.lastHeardAt = Date.now();
+    // A parked driver's phone sends no GPS fixes (the OS only reports
+    // movement), yet they are still available. While the socket is alive and
+    // the driver has not gone offline, the heartbeat keeps them in the pool at
+    // their last known position instead of letting them age out after 90 s.
+    const { driverId, category, available } = socket.data;
+    if (driverId && category && available) {
+      const h = await this.redis.hgetall(`driver:${driverId}`);
+      const lat = Number(h.lat);
+      const lng = Number(h.lng);
+      if (h.lat && h.lng && isFinite(lat) && isFinite(lng)) {
+        await this.dispatch.upsertDriverPosition(driverId, category, lat, lng);
+        await this.dispatch.markPresence(driverId, lat, lng);
+        await this.redis.hset(`driver:${driverId}`, 'lastPingAt', Date.now().toString());
+        await this.redis.del(`driver:reaping:${driverId}`);
+      }
+    }
     return { t: Date.now(), yourT: body?.t ?? null };
   }
 
@@ -422,6 +543,8 @@ export class RealtimeGateway implements OnGatewayInit, OnGatewayConnection, OnGa
         s.disconnect(true);
       }
     }
+
+    await this.dispatch.expireStalePresence();
 
     // Drivers whose grace period elapsed leave the geo pool.
     const stream = this.redis.scanStream({ match: 'driver:reaping:*', count: 100 });

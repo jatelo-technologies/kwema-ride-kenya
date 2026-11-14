@@ -78,7 +78,15 @@ class SessionStore {
     }
     await _prefs.remove(_kUserId);
     await _prefs.remove(_kUserJson);
+    await _prefs.remove('kwema_driver_online');
   }
+
+  /// The driver pressed "Go online" and has not pressed "Go offline". Kept on
+  /// disk so the app puts the driver back online by itself after the phone
+  /// kills the process or the app is reopened.
+  bool get driverWantsOnline => _prefs.getBool('kwema_driver_online') ?? false;
+  Future<void> setDriverWantsOnline(bool v) =>
+      _prefs.setBool('kwema_driver_online', v);
 
   Future<bool> get hasSession async => (await refreshToken()) != null;
 

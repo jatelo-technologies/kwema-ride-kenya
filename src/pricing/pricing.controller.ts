@@ -1,5 +1,5 @@
 import { Body, Controller, Post, UseGuards } from '@nestjs/common';
-import { IsIn, IsNumber, IsOptional } from 'class-validator';
+import { IsBoolean, IsIn, IsNumber, IsOptional } from 'class-validator';
 
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { FareService } from './fare.service';
@@ -22,6 +22,12 @@ class QuoteDto {
   @IsOptional() @IsIn(['ride', 'parcel', 'food']) serviceType?: string;
 
   @IsOptional() @IsNumber() promoDiscountCents?: number;
+
+  /**
+   * Also price the shared (car-pool) fare. Pooling is an extra option beside
+   * the normal quote: the main fare is always the solo fare.
+   */
+  @IsOptional() @IsBoolean() pool?: boolean;
 }
 
 @Controller('pricing')
@@ -73,6 +79,7 @@ export class PricingController {
             route.durationInTrafficSeconds ?? route.durationSeconds,
           pickup,
           promoDiscountCents: dto.promoDiscountCents,
+          pool: dto.pool === true && service === 'ride',
         });
 
         return {
@@ -81,6 +88,8 @@ export class PricingController {
           quoteId: quote.quoteId,
           expiresAt: quote.expiresAt,
           fare: quote.fare,
+          // Present only for pool-capable vehicles when pooling was asked for.
+          poolPreview: quote.poolPreview ?? null,
           distanceMetres: route.distanceMetres,
           durationSeconds:
             route.durationInTrafficSeconds ?? route.durationSeconds,

@@ -28,7 +28,7 @@ export class MessagesController {
     return this.messages.list(rideId, user.id, after);
   }
 
-  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  @Throttle({ default: { limit: 40, ttl: 60_000 } })
   @Post('messages')
   async send(
     @CurrentUser() user: AuthedUser,
@@ -36,19 +36,22 @@ export class MessagesController {
     @Body() dto: SendDto,
   ) {
     const m = await this.messages.send(rideId, user.id, dto.body);
-    // Live delivery to whoever has the trip open; push covers the rest.
-    this.gateway.server.to(`ride:${rideId}`).emit('ride:message', {
-      rideId,
-      id: m.id,
-      senderId: user.id,
-      body: m.body,
-      at: m.at,
-    });
+    // Live delivery to the two people on the trip (each is in their own room).
+    const payload = { rideId, id: m.id, senderId: user.id, body: m.body, at: m.at };
+    this.gateway.server.to(`user:${user.id}`).emit('ride:message', payload);
+    if (m.recipientId) this.gateway.server.to(`user:${m.recipientId}`).emit('ride:message', payload);
     return { id: m.id, at: m.at };
   }
 
-  @Get('contact')
-  contact(@CurrentUser() user: AuthedUser, @Param('rideId', ParseUUIDPipe) rideId: string) {
-    return this.messages.contact(rideId, user.id);
+  /** Name of the other person, for the chat header. No phone number. */
+  @Get('counterpart')
+  counterpart(@CurrentUser() user: AuthedUser, @Param('rideId', ParseUUIDPipe) rideId: string) {
+    return this.messages.counterpart(rideId, user.id);
+  }
+
+  @Get('call-config')
+  async callConfig(@CurrentUser() user: AuthedUser, @Param('rideId', ParseUUIDPipe) rideId: string) {
+    await this.messages.counterpart(rideId, user.id); // participant check
+    return { iceServers: this.messages.iceServers() };
   }
 }

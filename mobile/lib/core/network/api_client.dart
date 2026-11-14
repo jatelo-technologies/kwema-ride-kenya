@@ -14,6 +14,7 @@
 ///   invalidate each other's rotated token.
 
 import 'dart:async';
+import 'dart:convert';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -86,6 +87,40 @@ class ApiClient {
 
   Future<dynamic> patch(String path, [Map<String, dynamic>? body]) =>
       _send('PATCH', path, body: body);
+
+  // -----------------------------------------------------------------
+
+  /// A valid access token, renewing it first when it has expired or is about
+  /// to. The realtime socket calls this before every (re)connect: it used to
+  /// reuse the token it was first given, so after a network drop more than
+  /// fifteen minutes into a session the reconnect was refused and the driver
+  /// silently stopped receiving ride requests until the app was restarted.
+  Future<String?> freshAccessToken() async {
+    final token = await _session.accessToken();
+    if (token != null && !_expiresWithin(token, const Duration(seconds: 90))) {
+      return token;
+    }
+    final outcome = await _refreshOnce();
+    if (outcome == RefreshOutcome.rejected) {
+      onSessionExpired?.call();
+      return null;
+    }
+    return _session.accessToken();
+  }
+
+  static bool _expiresWithin(String jwt, Duration margin) {
+    try {
+      final parts = jwt.split('.');
+      if (parts.length != 3) return true;
+      final payload = utf8.decode(base64Url.decode(base64Url.normalize(parts[1])));
+      final exp = (jsonDecode(payload) as Map)['exp'];
+      if (exp is! num) return true;
+      final expiresAt = DateTime.fromMillisecondsSinceEpoch(exp.toInt() * 1000);
+      return expiresAt.isBefore(DateTime.now().add(margin));
+    } catch (_) {
+      return true;
+    }
+  }
 
   // -----------------------------------------------------------------
 

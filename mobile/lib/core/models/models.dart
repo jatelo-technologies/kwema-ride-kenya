@@ -9,6 +9,17 @@
 /// through some driver paths and a crash on parse would take out the app.
 
 import 'package:flutter/material.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart' show LatLng;
+
+/// Reads `{lat, lng}` from the wire; null when absent or not numeric.
+LatLng? _latLng(dynamic v) {
+  if (v is! Map) return null;
+  final lat = v['lat'], lng = v['lng'];
+  final la = lat is num ? lat.toDouble() : double.tryParse('$lat');
+  final ln = lng is num ? lng.toDouble() : double.tryParse('$lng');
+  if (la == null || ln == null) return null;
+  return LatLng(la, ln);
+}
 
 int _int(dynamic v, [int fallback = 0]) {
   if (v == null) return fallback;
@@ -193,6 +204,7 @@ class FareQuote {
     required this.polyline,
     required this.isEstimate,
     required this.expiresAt,
+    this.poolPreview,
   });
 
   final String quoteId;
@@ -208,6 +220,10 @@ class FareQuote {
   final bool isEstimate;
 
   final DateTime expiresAt;
+
+  /// Shared-ride prices for this trip. Null for categories that cannot be
+  /// pooled (motorbikes), for parcels and food, and when pooling is off.
+  final PoolPreview? poolPreview;
 
   int get totalFareCents => fare.totalFareCents;
   int get etaSeconds => durationSeconds;
@@ -225,6 +241,63 @@ class FareQuote {
         isEstimate: j['isEstimate'] == true,
         expiresAt: DateTime.tryParse(j['expiresAt']?.toString() ?? '') ??
             DateTime.now().add(const Duration(minutes: 3)),
+        poolPreview: j['poolPreview'] is Map
+            ? PoolPreview.fromJson(
+                (j['poolPreview'] as Map).cast<String, dynamic>())
+            : null,
+      );
+}
+
+/// What a shared ride would cost for the same trip, from the first discount
+/// tier (one other rider) to the deepest (a full vehicle). The discount is
+/// only earned when someone really rides along at the same time.
+class PoolPreview {
+  const PoolPreview({
+    required this.seats,
+    required this.sharedFareCents,
+    required this.bestFareCents,
+  });
+
+  final int seats;
+  final int sharedFareCents;
+  final int bestFareCents;
+
+  factory PoolPreview.fromJson(Map<String, dynamic> j) => PoolPreview(
+        seats: _int(j['seats']),
+        sharedFareCents: _int(j['sharedFareCents']),
+        bestFareCents: _int(j['bestFareCents']),
+      );
+}
+
+/// A shared trip another rider started, as listed for browsing. Carries a
+/// first name and areas only; nothing that identifies the rider further.
+class PoolTrip {
+  const PoolTrip({
+    required this.tripId,
+    required this.seatsLeft,
+    required this.coRiders,
+    required this.hasDriver,
+    required this.hostFirstName,
+    required this.fromArea,
+    required this.toArea,
+  });
+
+  final String tripId;
+  final int seatsLeft;
+  final int coRiders;
+  final bool hasDriver;
+  final String hostFirstName;
+  final String fromArea;
+  final String toArea;
+
+  factory PoolTrip.fromJson(Map<String, dynamic> j) => PoolTrip(
+        tripId: j['tripId']?.toString() ?? '',
+        seatsLeft: _int(j['seatsLeft']),
+        coRiders: _int(j['coRiders']),
+        hasDriver: j['hasDriver'] == true,
+        hostFirstName: j['hostFirstName']?.toString() ?? '',
+        fromArea: j['fromArea']?.toString() ?? '',
+        toArea: j['toArea']?.toString() ?? '',
       );
 }
 
@@ -319,6 +392,17 @@ class Ride {
     this.etaSeconds,
     this.serviceType = ServiceType.ride,
     this.deliveryCode,
+    this.poolMode,
+    this.poolCoRiders = 0,
+    this.poolDiscountCents = 0,
+    this.poolSharedWith = 0,
+    this.riderName,
+    this.pickupAddress,
+    this.dropoffAddress,
+    this.pickupLatLng,
+    this.dropoffLatLng,
+    this.passengerName,
+    this.createdAt,
   });
 
   final String id;
@@ -337,6 +421,38 @@ class Ride {
   /// Shown to the sender only. They pass it to the recipient, who quotes it
   /// to the courier at handover — that is what makes it proof.
   final String? deliveryCode;
+
+  /// 'match', 'host' or 'join' when the rider chose a shared ride; null when
+  /// they rode alone.
+  final String? poolMode;
+
+  /// Other riders currently on the same trip.
+  final int poolCoRiders;
+
+  /// Set at completion: what sharing took off the fare, and how many others
+  /// were aboard at the same time.
+  final int poolDiscountCents;
+  final int poolSharedWith;
+
+  /// Driver side only: who this passenger is and where they are going.
+  final String? riderName;
+  final String? pickupAddress;
+  final String? dropoffAddress;
+
+  /// Driver side: where to collect and where to drop, for route guidance.
+  final LatLng? pickupLatLng;
+  final LatLng? dropoffLatLng;
+
+  /// Rider side: set when the ride was booked for someone else.
+  final String? passengerName;
+
+  /// When this device first saw the ride; used to tell a ride that was
+  /// cancelled elsewhere from one that is merely not listed yet.
+  final DateTime? createdAt;
+
+  bool get forOther => passengerName != null && passengerName!.isNotEmpty;
+
+  bool get isPool => poolMode != null;
 
   int get payableCents => finalFareCents ?? quotedFareCents;
 
@@ -362,11 +478,49 @@ class Ride {
         etaSeconds: j['etaSeconds'] == null ? null : _int(j['etaSeconds']),
         serviceType: ServiceType.fromWire(j['serviceType']?.toString()),
         deliveryCode: j['deliveryCode']?.toString(),
+        poolMode: j['pool'] is Map
+            ? (j['pool'] as Map)['mode']?.toString()
+            : (j['poolMode'] is String ? j['poolMode'] as String : null),
+        poolCoRiders: j['pool'] is Map
+            ? _int((j['pool'] as Map)['coRiders'])
+            : 0,
+        poolDiscountCents: _int(
+            j['poolDiscountCents'] ??
+                (j['pool'] is Map ? (j['pool'] as Map)['discountCents'] : null)),
+        poolSharedWith: _int(
+            j['poolSharedWith'] ??
+                (j['pool'] is Map ? (j['pool'] as Map)['sharedWith'] : null)),
+        passengerName: j['passengerName']?.toString(),
+        pickupAddress: j['pickupAddress']?.toString(),
+        dropoffAddress: j['dropoffAddress']?.toString(),
+        pickupLatLng: _latLng(j['pickup']),
+        dropoffLatLng: _latLng(j['dropoff']),
+        createdAt: DateTime.now(),
+      );
+
+  /// A passenger added to a driver's vehicle mid-trip (`pool:rider_added`).
+  factory Ride.fromPoolRider(Map<String, dynamic> j) => Ride(
+        id: j['rideId']?.toString() ?? '',
+        reference: '',
+        status: RideStatus.fromWire(j['status']?.toString()),
+        category: VehicleCategory.standard,
+        quotedFareCents: _int(j['fareCents']),
+        paymentMethod: j['paymentMethod']?.toString() ?? 'cash',
+        isPaid: false,
+        poolMode: 'join',
+        riderName: j['riderName']?.toString(),
+        pickupAddress: j['pickupAddress']?.toString(),
+        dropoffAddress: j['dropoffAddress']?.toString(),
+        pickupLatLng: _latLng(j['pickup']),
+        dropoffLatLng: _latLng(j['dropoff']),
       );
 
   Ride copyWith({RideStatus? status, DriverProfile? driver,
       VehicleInfo? vehicle, int? etaSeconds, int? finalFareCents, bool? isPaid,
-      String? deliveryCode}) =>
+      String? deliveryCode, int? poolCoRiders, int? poolDiscountCents,
+      int? poolSharedWith, String? passengerName,
+      String? pickupAddress, String? dropoffAddress,
+      LatLng? pickupLatLng, LatLng? dropoffLatLng}) =>
       Ride(
         id: id, reference: reference,
         status: status ?? this.status,
@@ -380,6 +534,17 @@ class Ride {
         etaSeconds: etaSeconds ?? this.etaSeconds,
         serviceType: serviceType,
         deliveryCode: deliveryCode ?? this.deliveryCode,
+        poolMode: poolMode,
+        poolCoRiders: poolCoRiders ?? this.poolCoRiders,
+        poolDiscountCents: poolDiscountCents ?? this.poolDiscountCents,
+        poolSharedWith: poolSharedWith ?? this.poolSharedWith,
+        riderName: riderName,
+        pickupAddress: pickupAddress ?? this.pickupAddress,
+        dropoffAddress: dropoffAddress ?? this.dropoffAddress,
+        pickupLatLng: pickupLatLng ?? this.pickupLatLng,
+        dropoffLatLng: dropoffLatLng ?? this.dropoffLatLng,
+        passengerName: passengerName ?? this.passengerName,
+        createdAt: createdAt,
       );
 }
 
@@ -405,9 +570,18 @@ class RideOffer {
     required this.paymentMethod,
     this.riderName,
     this.riderPhotoUrl,
+    this.isPool = false,
+    this.poolCoRiders = 0,
+    this.poolDetourM = 0,
+    this.pickupLatLng,
+    this.dropoffLatLng,
   });
 
   final String rideId;
+
+  /// Where to collect and drop, for route guidance once accepted.
+  final LatLng? pickupLatLng;
+  final LatLng? dropoffLatLng;
 
   /// Short-lived HMAC issued with the offer. Returned on accept so the server
   /// can reject a driver claiming a ride they were never offered.
@@ -435,6 +609,14 @@ class RideOffer {
   final String? riderName;
   final String? riderPhotoUrl;
 
+  /// A shared ride. [fareCents] is then this rider's shared price, and
+  /// [poolCoRiders] is how many riders are already aboard.
+  final bool isPool;
+  final int poolCoRiders;
+
+  /// Extra metres the driver would drive to take this rider (live match only).
+  final int poolDetourM;
+
   factory RideOffer.fromJson(Map<String, dynamic> j) => RideOffer(
         rideId: j['rideId']?.toString() ?? '',
         offerToken: j['offerToken']?.toString() ?? '',
@@ -453,6 +635,11 @@ class RideOffer {
         paymentMethod: j['paymentMethod']?.toString() ?? 'cash',
         riderName: j['riderName']?.toString(),
         riderPhotoUrl: j['riderPhotoUrl']?.toString(),
+        isPool: j['isPool'] == true,
+        poolCoRiders: _int(j['poolCoRiders']),
+        poolDetourM: _int(j['poolDetourM']),
+        pickupLatLng: _latLng(j['pickup']),
+        dropoffLatLng: _latLng(j['dropoff']),
       );
 }
 

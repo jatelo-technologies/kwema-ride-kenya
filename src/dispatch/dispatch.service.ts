@@ -15,6 +15,10 @@
  * the third ring does the work. Widening is cheaper than a bad first match.
  */
 
+import {
+  BASE_DEBT_CEILING_CENTS, HEADROOM_PER_TRIP_CENTS, MAX_DEBT_CEILING_CENTS,
+  debtCeilingFor, debtLimitEnforced,
+} from '../common/debt';
 import { Injectable, Inject, Logger } from '@nestjs/common';
 import Redis from 'ioredis';
 import { DataSource } from 'typeorm';
@@ -93,7 +97,8 @@ export const DISPATCH_CONFIG = {
   /** A ping older than this means the device dropped off; skip the driver. */
   maxPingAgeMs: 45_000,
   /** Drivers who owe more than this in cash commission stop receiving offers. */
-  walletFloorCents: country.walletFloorCents,
+  // Offers stop at the driver's own debt ceiling (see common/debt.ts), the
+  // same line the app shows as "blocked".
 
   /** Scoring weights — must sum to 1.0. */
   weights: {
@@ -197,6 +202,8 @@ export class DispatchService {
     candidates: ScoredDriver[],
     notify: (driverId: string, offer: ScoredDriver, ttlSeconds: number) => Promise<void>,
     waitForResponse: (rideId: string, driverId: string, ttlSeconds: number) => Promise<'accepted' | 'declined' | 'timeout'>,
+    /** Filled with the drivers who were actually offered the ride (not skipped as busy). */
+    offered?: string[],
   ): Promise<string | null> {
     const ttl = DISPATCH_CONFIG.offerTtlSeconds;
 
@@ -207,6 +214,7 @@ export class DispatchService {
       const lockKey = `dispatch:lock:driver:${candidate.driverId}`;
       const locked = await this.redis.set(lockKey, req.rideId, 'EX', ttl + 2, 'NX');
       if (locked !== 'OK') continue;
+      offered?.push(candidate.driverId);
 
       try {
         await this.recordOffer(req.rideId, candidate, index + 1, ttl);
@@ -227,6 +235,39 @@ export class DispatchService {
   }
 
   /**
+   * Offers one ride to one specific driver and waits for the answer.
+   *
+   * Used for car pooling, where the driver is chosen by route (they already
+   * have riders aboard) rather than by proximity among idle drivers. It takes
+   * the same per-driver lock as `offerSequentially`, so a driver can never be
+   * offered a pool seat and a normal ride at the same instant.
+   *
+   * Returns 'busy' when the driver is mid-offer for something else.
+   */
+  async offerToDriver(
+    rideId: string,
+    candidate: ScoredDriver,
+    notify: (driverId: string, offer: ScoredDriver, ttlSeconds: number) => Promise<void>,
+    waitForResponse: (rideId: string, driverId: string, ttlSeconds: number) => Promise<'accepted' | 'declined' | 'timeout'>,
+  ): Promise<'accepted' | 'declined' | 'timeout' | 'busy'> {
+    const ttl = DISPATCH_CONFIG.offerTtlSeconds;
+    const lockKey = `dispatch:lock:driver:${candidate.driverId}`;
+    const locked = await this.redis.set(lockKey, rideId, 'EX', ttl + 2, 'NX');
+    if (locked !== 'OK') return 'busy';
+
+    try {
+      await this.recordOffer(rideId, candidate, 1, ttl);
+      await notify(candidate.driverId, candidate, ttl);
+      const outcome = await waitForResponse(rideId, candidate.driverId, ttl);
+      await this.closeOffer(rideId, candidate.driverId, outcome);
+      await this.updateAcceptanceCounters(candidate.driverId, outcome);
+      return outcome;
+    } finally {
+      await this.releaseLock(lockKey, rideId);
+    }
+  }
+
+  /**
    * Writes a driver's position into the geo set. Called from the realtime
    * gateway on every location ping. One sorted set per category keeps
    * GEOSEARCH scans small and lets us shard by category later.
@@ -243,6 +284,101 @@ export class DispatchService {
       .hset(`driver:${driverId}`, 'lastPingAt', Date.now().toString())
       .expire(`driver:${driverId}`, 3600)
       .exec();
+  }
+
+  /**
+   * Presence. A driver who is sending location pings is, by definition,
+   * online, and everything dispatch needs to know about them has to be
+   * somewhere dispatch can read it: the database position (for the PostGIS
+   * fallback and surge) and the Redis snapshot (for the hot path).
+   *
+   * Written at most every few seconds per driver, not on every ping. A driver
+   * who has just gone offline simply stops pinging and ages out of every
+   * query on the 45-second freshness window.
+   *
+   * Only an `offline` driver is promoted to `online_idle`, and only when they
+   * have been verified and are not past the wallet floor; a driver mid-offer
+   * or mid-trip keeps that state.
+   */
+  async markPresence(driverId: string, lat: number, lng: number): Promise<void> {
+    const gate = await this.redis.set(`driver:presence:${driverId}`, '1', 'EX', 8, 'NX');
+    if (gate !== 'OK') return;
+
+    const [d] = await this.db.query(
+      `UPDATE drivers d
+          SET last_location = ST_SetSRID(ST_MakePoint($3, $2), 4326)::geography,
+              last_location_at = now(),
+              state = CASE
+                        WHEN d.state = 'offline'
+                         AND d.compliance_verified_at IS NOT NULL
+                         AND ($4::boolean OR d.wallet_balance_cents > -LEAST($5::bigint + d.completed_trips * $6::bigint, $7::bigint))
+                        THEN 'online_idle'::driver_state
+                        ELSE d.state
+                      END
+         FROM vehicles v, users u
+        WHERE d.id = $1 AND v.id = d.active_vehicle_id AND v.is_active
+          AND u.id = d.user_id AND u.status = 'active'
+        RETURNING d.state::text AS state, d.active_vehicle_id, v.category::text AS category,
+                  d.acceptance_rate, d.cancellation_rate, d.completed_trips,
+                  d.wallet_balance_cents, COALESCE(v.helmets_provided, 0) AS helmets,
+                  u.rating_avg,
+                  EXTRACT(EPOCH FROM LEAST(
+                    d.driving_licence_expiry, v.insurance_expiry, v.inspection_expiry,
+                    d.operator_licence_expiry)::timestamptz)::bigint
+                    AS valid_until`,
+      [driverId, lat, lng, !debtLimitEnforced(),
+       BASE_DEBT_CEILING_CENTS, HEADROOM_PER_TRIP_CENTS, MAX_DEBT_CEILING_CENTS],
+    );
+    if (!d) return;
+
+    const key = `driver:${driverId}`;
+    await this.redis.hset(key, {
+      vehicleId: d.active_vehicle_id,
+      category: d.category,
+      state: d.state,
+      rating: String(Number(d.rating_avg ?? 5)),
+      cancellationRate: String(Number(d.cancellation_rate ?? 0)),
+      completedTrips: String(Number(d.completed_trips ?? 0)),
+      walletBalanceCents: String(Number(d.wallet_balance_cents ?? 0)),
+      helmets: String(Number(d.helmets)),
+      complianceValidUntil: String(Number(d.valid_until ?? 0)),
+    });
+    // The rolling acceptance rate lives in Redis once dispatch starts
+    // counting offers; only seed it.
+    await this.redis.hsetnx(key, 'acceptanceRate', String(Number(d.acceptance_rate ?? 1)));
+  }
+
+  async vehicleCategoryOf(driverId: string): Promise<VehicleCategory | undefined> {
+    const [row] = await this.db.query(
+      `SELECT v.category FROM drivers d JOIN vehicles v ON v.id = d.active_vehicle_id
+        WHERE d.id = $1`,
+      [driverId],
+    );
+    return row?.category;
+  }
+
+  /** Drivers whose pings stopped are taken out of the idle set. */
+  async expireStalePresence(): Promise<void> {
+    const rows = await this.db.query(
+      `UPDATE drivers SET state = 'offline'
+        WHERE state = 'online_idle'
+          AND (last_location_at IS NULL OR last_location_at < now() - interval '90 seconds')
+        RETURNING id`,
+    );
+    for (const r of rows) await this.redis.hset(`driver:${r.id}`, 'state', 'offline');
+  }
+
+  /** Driver chose to stop working. Only an idle driver is changed; one on a trip finishes it. */
+  async setOffline(driverId: string, category?: VehicleCategory): Promise<void> {
+    const [row] = await this.db.query(
+      `UPDATE drivers SET state = 'offline'
+        WHERE id = $1 AND state IN ('online_idle', 'offline')
+        RETURNING id`,
+      [driverId],
+    );
+    if (row) await this.redis.hset(`driver:${driverId}`, 'state', 'offline');
+    const cat = category ?? (await this.vehicleCategoryOf(driverId));
+    if (row && cat) await this.removeDriverFromPool(driverId, cat);
   }
 
   async removeDriverFromPool(driverId: string, category: VehicleCategory): Promise<void> {
@@ -322,7 +458,7 @@ export class DispatchService {
   private passesHardFilters(snap: DriverSnapshot, req: DispatchRequest): boolean {
     if (snap.state !== 'online_idle') return false;
     if (Date.now() - snap.lastPingAt > DISPATCH_CONFIG.maxPingAgeMs) return false;
-    if (snap.walletBalanceCents < DISPATCH_CONFIG.walletFloorCents) return false;
+    if (debtLimitEnforced() && snap.walletBalanceCents <= -debtCeilingFor(snap.completedTrips)) return false;
     // Licence/insurance must be valid *now*, not when the driver signed on.
     if (snap.complianceValidUntil * 1000 < Date.now()) return false;
     if (req.minDriverRating && snap.rating < req.minDriverRating) return false;
@@ -401,6 +537,19 @@ export class DispatchService {
     );
 
     const excluded = new Set(req.excludeDriverIds ?? []);
+
+    // The fallback must honour the debt line too, or a driver the hot path
+    // rejected comes straight back in through it.
+    if (debtLimitEnforced() && rows.length) {
+      const owing = await this.db.query(
+        `SELECT id FROM drivers
+          WHERE id = ANY($1::uuid[])
+            AND wallet_balance_cents <= -LEAST($2::bigint + completed_trips * $3::bigint, $4::bigint)`,
+        [rows.map((r: any) => r.driver_id), BASE_DEBT_CEILING_CENTS, HEADROOM_PER_TRIP_CENTS, MAX_DEBT_CEILING_CENTS],
+      );
+      for (const o of owing) excluded.add(o.id);
+    }
+
     return rows
       .filter((r: any) => !excluded.has(r.driver_id))
       .map((r: any): ScoredDriver => {
@@ -465,10 +614,15 @@ export class DispatchService {
    */
   private async updateAcceptanceCounters(driverId: string, outcome: string): Promise<void> {
     const key = `driver:${driverId}`;
-    const pipeline = this.redis.pipeline();
-    pipeline.hincrby(key, 'offersSent24h', 1);
-    if (outcome === 'accepted') pipeline.hincrby(key, 'offersAccepted24h', 1);
-    const [[, sent], [, accepted]] = (await pipeline.exec()) as Array<[unknown, number]>;
+    const sent = await this.redis.hincrby(key, 'offersSent24h', 1);
+    // Only an accepted offer moves the accepted counter. The earlier version
+    // built a pipeline with one command for a decline or timeout and then read
+    // two results from it, which threw and, unhandled, took the server down
+    // the first time any driver let an offer lapse.
+    const accepted =
+      outcome === 'accepted'
+        ? await this.redis.hincrby(key, 'offersAccepted24h', 1)
+        : Number((await this.redis.hget(key, 'offersAccepted24h')) ?? 0);
 
     const rate = sent > 0 ? Math.min(1, (accepted ?? 0) / sent) : 1;
     await this.redis.hset(key, 'acceptanceRate', rate.toFixed(3));

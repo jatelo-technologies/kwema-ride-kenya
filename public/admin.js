@@ -189,6 +189,9 @@
             <div class="label">Unserved requests</div>
             <div class="value">${t.unservedPercent}%</div>
             <div class="sub">${t.expired} found no driver</div></div>
+          ${d.pool && d.pool.poolRides ? `<div class="stat"><div class="label">Shared rides today</div>
+            <div class="value">${d.pool.sharedRides}</div>
+            <div class="sub">${d.pool.trips} pool trips, ${fmtMoney(d.pool.discountCents)} saved by riders</div></div>` : ''}
           <div class="stat"><div class="label">Drivers online</div>
             <div class="value">${f.online}</div>
             <div class="sub">${f.idle} idle of ${f.drivers} total</div></div>
@@ -388,9 +391,9 @@
             </select></td>
         </tr>`).join('')}</tbody></table>
         <div style="padding:16px 18px;background:var(--surface);font-size:13.5px;color:var(--muted)">
-          An applicant must sign up in the rider app with the same number before
-          a driver record can be created — that is what verifies the number.
-          Until "signed up" shows, use the Drivers tab only after they have.
+          You can add an approved applicant straight from the Drivers tab — they
+          do not need the rider app. Their number is verified when they first
+          sign in to the driver app with the SMS code.
         </div>`;
 
       box.querySelectorAll('[data-set]').forEach((sel) => {
@@ -425,10 +428,12 @@
         <div class="panel-head"><h2>Add a driver</h2></div>
         <div class="panel-body">
           <p style="color:var(--muted);font-size:14px;margin-bottom:16px">
-            The person must sign up in the rider app with this number first —
-            that way the number is verified before it is attached to a vehicle.</p>
+            Add the driver here directly — they do not need the rider app. They
+            sign in to the driver app with this number and the SMS code, which
+            verifies the number and opens this account.</p>
           <div id="dmsg"></div>
           <form class="grid" id="dform">
+            <div><label>Full name</label><input name="fullName" placeholder="As on driving licence" required></div>
             <div><label>Phone</label><input name="phone" value="+254" required></div>
             <div><label>Vehicle type</label><select name="category">
               <option value="boda">Moto-taxi</option><option value="bajaji">Tuk-tuk</option>
@@ -560,7 +565,7 @@
           <td>${r.driver_name ? esc(r.driver_name) : '<span style="color:var(--muted)">—</span>'}</td>
           <td style="font-size:13px;max-width:230px">${esc(r.pickup_address || '?')} →
               ${esc(r.dropoff_address || '?')}</td>
-          <td>${esc(r.requested_category)}</td>
+          <td>${esc(r.requested_category)}${r.pool_mode ? ' <span class="pill p-ok">pool'+(r.pool_shared_with ? ' ×'+(r.pool_shared_with+1) : '')+'</span>' : ''}</td>
           <td class="money">${fmtMoney(r.final_fare_cents ?? r.quoted_fare_cents)}</td>
           <td>${esc(r.payment_method)}${r.is_paid ? ' <span class="pill p-ok">paid</span>' : ''}</td>
           <td><span class="pill ${r.status === 'completed' ? 'p-ok' :

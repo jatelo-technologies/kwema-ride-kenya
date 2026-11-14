@@ -2,6 +2,8 @@
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/format/money.dart';
@@ -23,8 +25,22 @@ class RideTrackingSheet extends ConsumerWidget {
     final l10n = AppLocalizations.of(context);
     final theme = Theme.of(context);
     final controller = ref.read(riderControllerProvider.notifier);
+    final rs = ref.watch(riderControllerProvider);
     final searching = ride.status == RideStatus.searching ||
         ride.status == RideStatus.requested;
+    final open = rs.activeRides;
+    final driverAt = rs.driverPositions[ride.id];
+    final target = ride.status == RideStatus.inProgress
+        ? ride.dropoffLatLng
+        : ride.pickupLatLng;
+    final awayM = (driverAt != null &&
+            target != null &&
+            (ride.status == RideStatus.accepted ||
+                ride.status == RideStatus.inProgress))
+        ? Geolocator.distanceBetween(driverAt.latitude, driverAt.longitude,
+                target.latitude, target.longitude)
+            .round()
+        : null;
 
     return Container(
       decoration: BoxDecoration(
@@ -36,12 +52,62 @@ class RideTrackingSheet extends ConsumerWidget {
       ),
       child: SafeArea(
         top: false,
-        child: Padding(
+        child: ConstrainedBox(
+         constraints: BoxConstraints(
+             maxHeight: MediaQuery.of(context).size.height * 0.62),
+         child: SingleChildScrollView(
           padding: const EdgeInsets.fromLTRB(20, 18, 20, 12),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // Several rides at once: switch between them here.
+              if (rs.rides.length > 1) ...[
+                SizedBox(
+                  height: 44,
+                  child: ListView(
+                    scrollDirection: Axis.horizontal,
+                    children: [
+                      for (final r in rs.rides.values)
+                        Padding(
+                          padding: const EdgeInsets.only(right: 8),
+                          child: ChoiceChip(
+                            selected: r.id == ride.id,
+                            avatar: Icon(
+                                r.status.isTerminal
+                                    ? Icons.check_circle_outline
+                                    : Icons.directions_car,
+                                size: 16),
+                            label: Text(
+                              '${r.forOther ? r.passengerName : l10n.translate('ride.me')}'
+                              ' · ${l10n.translate(r.status.i18nKey)}',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            onSelected: (_) => controller.focusRide(r.id),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 10),
+              ],
+
+              if (ride.forOther) ...[
+                Row(children: [
+                  Icon(Icons.person_pin_circle_outlined, size: 18,
+                      color: theme.colorScheme.primary),
+                  const SizedBox(width: 6),
+                  Text(
+                    l10n.translate('ride.for_name',
+                        params: {'name': ride.passengerName ?? ''}),
+                    style: theme.textTheme.bodyMedium
+                        ?.copyWith(fontWeight: FontWeight.w700),
+                  ),
+                ]),
+                const SizedBox(height: 6),
+              ],
+
               Row(children: [
                 if (searching)
                   const SizedBox(
@@ -64,6 +130,46 @@ class RideTrackingSheet extends ConsumerWidget {
                         ?.copyWith(color: theme.colorScheme.primary),
                   ),
               ]),
+
+              if (ride.status == RideStatus.arrived) ...[
+                const SizedBox(height: 12),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: KwemaColors.go.withValues(alpha: 0.14),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(children: [
+                    const Icon(Icons.notifications_active,
+                        color: KwemaColors.go),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        l10n.translate('ride.driver_here'),
+                        style: theme.textTheme.titleSmall
+                            ?.copyWith(fontWeight: FontWeight.w800),
+                      ),
+                    ),
+                  ]),
+                ),
+              ] else if (awayM != null) ...[
+                const SizedBox(height: 6),
+                Text(
+                  l10n.translate(
+                      ride.status == RideStatus.inProgress
+                          ? 'ride.to_destination'
+                          : 'ride.driver_away',
+                      params: {
+                        'dist': awayM >= 1000
+                            ? '${(awayM / 1000).toStringAsFixed(1)} km'
+                            : '$awayM m'
+                      }),
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                      color: theme.colorScheme.primary,
+                      fontWeight: FontWeight.w700),
+                ),
+              ],
 
               // The sender reads this to the recipient, who quotes it to the
               // courier. Shown prominently because it is useless if missed.
@@ -103,6 +209,25 @@ class RideTrackingSheet extends ConsumerWidget {
                 Text(ride.reference, style: theme.textTheme.bodySmall),
               ],
 
+              if (ride.isPool && !ride.status.isTerminal) ...[
+                const SizedBox(height: 10),
+                Row(children: [
+                  Icon(Icons.groups_outlined, size: 18,
+                      color: theme.colorScheme.primary),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      ride.poolCoRiders > 0
+                          ? l10n.translate('pool.sharing',
+                              params: {'n': '${ride.poolCoRiders}'})
+                          : l10n.translate('pool.waiting_riders'),
+                      style: theme.textTheme.bodyMedium
+                          ?.copyWith(fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                ]),
+              ],
+
               if (ride.driver != null) ...[
                 const SizedBox(height: 16),
                 Container(
@@ -115,7 +240,7 @@ class RideTrackingSheet extends ConsumerWidget {
                     ProfilePhoto(
                       name: ride.driver!.name,
                       photoUrl: ride.driver!.photoUrl,
-                      radius: 24,
+                      radius: 30,
                     ),
                     const SizedBox(width: 12),
                     Expanded(
@@ -124,27 +249,53 @@ class RideTrackingSheet extends ConsumerWidget {
                         children: [
                           Text(ride.driver!.name,
                               style: theme.textTheme.titleMedium
-                                  ?.copyWith(fontWeight: FontWeight.w700)),
+                                  ?.copyWith(fontWeight: FontWeight.w800)),
                           Text(
                             '★ ${ride.driver!.rating.toStringAsFixed(1)}'
-                            '${ride.vehicle == null ? '' : ' · ${ride.vehicle!.plate}'}',
+                            '${ride.driver!.trips > 0 ? ' · ${l10n.translate('ride.trips', params: {'n': '${ride.driver!.trips}'})}' : ''}',
                             style: theme.textTheme.bodySmall,
                           ),
-                          if (ride.vehicle != null)
+                          if (ride.vehicle != null) ...[
+                            const SizedBox(height: 4),
                             Text(
                               '${ride.vehicle!.colour} ${ride.vehicle!.make} '
                               '${ride.vehicle!.model}',
-                              style: theme.textTheme.bodySmall,
+                              style: theme.textTheme.bodyMedium
+                                  ?.copyWith(fontWeight: FontWeight.w600),
                             ),
+                            const SizedBox(height: 4),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 10, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: theme.colorScheme.surface,
+                                border: Border.all(
+                                    color: theme.colorScheme.onSurface,
+                                    width: 1.6),
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Text(
+                                ride.vehicle!.plate,
+                                style: theme.textTheme.titleMedium?.copyWith(
+                                    fontWeight: FontWeight.w900,
+                                    letterSpacing: 1.5),
+                              ),
+                            ),
+                          ],
                         ],
                       ),
                     ),
-                    // Call, copy the number, or message — the real number is
-                    // fetched from the server only for a live trip.
-                    IconButton.filled(
-                      icon: const Icon(Icons.chat_bubble_outline, size: 20),
-                      onPressed: () => ContactSheet.show(context, ride.id),
-                    ),
+                    // Talk to the driver inside the app (messages or an
+                    // audio call). The driver's phone number is never shown.
+                    if (ride.status == RideStatus.accepted ||
+                        ride.status == RideStatus.arrived ||
+                        ride.status == RideStatus.inProgress)
+                      IconButton.filled(
+                        tooltip: l10n.translate('contact.talk_driver'),
+                        icon: const Icon(Icons.chat_bubble_outline, size: 20),
+                        onPressed: () => ContactSheet.show(context, ride.id,
+                            peerName: ride.driver!.name),
+                      ),
                   ]),
                 ),
               ],
@@ -165,6 +316,18 @@ class RideTrackingSheet extends ConsumerWidget {
                 ),
                 Chip(label: Text(l10n.translate('payment.${ride.paymentMethod}'))),
               ]),
+
+              if (ride.status == RideStatus.completed &&
+                  ride.poolDiscountCents > 0) ...[
+                const SizedBox(height: 8),
+                Text(
+                  l10n.translate('pool.saved',
+                      params: {'amount': formatMoney(ride.poolDiscountCents)}),
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                      color: theme.colorScheme.primary,
+                      fontWeight: FontWeight.w700),
+                ),
+              ],
 
               // Available for the whole trip, not only when something has
               // already gone wrong.
@@ -231,8 +394,33 @@ class RideTrackingSheet extends ConsumerWidget {
                       style: const TextStyle(color: KwemaColors.go)),
                 ]),
               ],
+
+              // Booking again never waits for anything: not for payment, not
+              // for the rating, not for another ride to finish.
+              const SizedBox(height: 10),
+              SizedBox(
+                width: double.infinity, height: 48,
+                child: OutlinedButton.icon(
+                  icon: const Icon(Icons.add_road),
+                  onPressed: ride.status.isTerminal
+                      ? controller.requestAnother
+                      : controller.startAnotherRide,
+                  label: Text(l10n.translate('ride.another')),
+                ),
+              ),
+              if (open.length > 1 || (open.isNotEmpty && ride.status.isTerminal))
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(
+                    l10n.translate('ride.open_count',
+                        params: {'n': '${open.length}'}),
+                    style: theme.textTheme.bodySmall,
+                    textAlign: TextAlign.center,
+                  ),
+                ),
             ],
           ),
+         ),
         ),
       ),
     );

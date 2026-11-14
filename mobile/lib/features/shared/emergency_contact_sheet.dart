@@ -56,7 +56,7 @@ class _EmergencyContactSheetState extends ConsumerState<EmergencyContactSheet> {
       setState(() => _error = 'sos.err_name');
       return;
     }
-    // International format, not only +255: plenty of people here have family
+    // International format, not only the local code: plenty of people here have family
     // in Kenya, Uganda or the Gulf who would be the right person to call.
     if (!RegExp(r'^\+[0-9]{9,15}$').hasMatch(phone)) {
       setState(() => _error = 'sos.err_phone');

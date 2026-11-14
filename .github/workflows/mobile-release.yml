@@ -87,6 +87,42 @@ jobs:
           python3 tool/patch_android_manifest.py \
             android/app/src/main/AndroidManifest.xml "$MAPS_KEY"
 
+      # Some plugins (flutter_webrtc among them) still declare an old
+      # compileSdk, while the AndroidX libraries they pull in require 34 or
+      # newer; the release build then stops at the AAR metadata check. This
+      # Gradle init script lifts any plugin module compiled below 34 to 36.
+      # It touches only the CI build, never the repository.
+      - name: Raise plugin compileSdk
+        run: |
+          mkdir -p "$HOME/.gradle/init.d"
+          cat > "$HOME/.gradle/init.d/force-compile-sdk.gradle" <<'GRADLE'
+          allprojects {
+              afterEvaluate { p ->
+                  def android = p.extensions.findByName('android')
+                  if (android != null && p.name != 'app') {
+                      def declared = android.compileSdkVersion?.toString() ?: ''
+                      def m = (declared =~ /(\d+)/)
+                      def level = m.find() ? m.group(1).toInteger() : 0
+                      if (level < 34) {
+                          try { android.compileSdk = 36 } catch (Throwable ignored) { android.compileSdkVersion(36) }
+                          println "compileSdk ${level} -> 36 for ${p.name}"
+                      }
+                  }
+                  // flutter_local_notifications needs core-library desugaring
+                  // in the app module.
+                  if (android != null && p.name == 'app') {
+                      try {
+                          android.compileOptions.coreLibraryDesugaringEnabled = true
+                          if (p.configurations.findByName('coreLibraryDesugaring') != null) {
+                              p.dependencies.add('coreLibraryDesugaring', 'com.android.tools:desugar_jdk_libs:2.0.4')
+                          }
+                          println "core library desugaring enabled for app"
+                      } catch (Throwable t) { println "desugaring not enabled: ${t}" }
+                  }
+              }
+          }
+          GRADLE
+
       - name: Install dependencies
         working-directory: mobile
         run: |
@@ -178,7 +214,11 @@ jobs:
 
       # Artifacts are kept even when the release step is skipped, so a
       # workflow_dispatch run without a tag still produces something usable.
+      # continue-on-error: GitHub's artifact storage can fill up on a free
+      # account, and a full quota must not stop the release below, which is
+      # the real download and does not count against that quota.
       - uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: apks
           path: |

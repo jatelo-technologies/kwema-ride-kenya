@@ -31,6 +31,7 @@ class CreateDriverDto {
   @IsString() insurancePolicyNo: string;
   @IsString() insuranceExpiry: string;
   @IsOptional() @IsString() homeCity?: string;
+  @IsOptional() @IsString() fullName?: string;
 }
 
 class PublishTariffDto {

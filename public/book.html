@@ -29,6 +29,12 @@
   #map{width:100%;height:100vh;background:var(--surface)}
   .map-fallback{display:flex;align-items:center;justify-content:center;height:100%;
     text-align:center;padding:40px;color:var(--muted);flex-direction:column;gap:10px}
+  .pool-box{border:1.5px dashed var(--line);border-radius:var(--r);padding:12px;margin-top:10px;background:#fff}
+  .pool-price{font-weight:700;font-size:14px}
+  .pool-note{font-size:13px;color:var(--muted);margin-top:4px}
+  .pool-trip{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 0;
+    border-top:1px solid var(--line);font-size:14px}
+  .pool-trip .btn{padding:8px 14px;font-size:13px;flex:none}
   .cat{display:flex;align-items:center;gap:13px;padding:13px;border:1.5px solid var(--line);
     border-radius:var(--r);cursor:pointer;margin-bottom:9px;background:#fff;transition:.14s}
   .cat.on{border-color:var(--lk-500);border-width:2px;background:var(--lk-50)}
@@ -42,6 +48,10 @@
   .pm button{flex:1;padding:12px 6px;border:1.5px solid var(--line);border-radius:var(--r);
     background:#fff;cursor:pointer;font-family:inherit;font-size:13px;font-weight:600;color:var(--ink)}
   .pm button.on{border-color:var(--lk-500);border-width:2px;background:var(--lk-50);color:var(--lk-700)}
+  .pool-modes{display:flex;gap:8px;margin-bottom:14px}
+  .pool-modes button{flex:1;padding:12px 6px;border:1.5px solid var(--line);border-radius:var(--r);
+    background:#fff;cursor:pointer;font-family:inherit;font-size:13px;font-weight:600;color:var(--ink)}
+  .pool-modes button.on{border-color:var(--lk-500);border-width:2px;background:var(--lk-50);color:var(--lk-700)}
   .status-box{text-align:center;padding:26px 0}
   .spinner{width:44px;height:44px;border:4px solid var(--line);border-top-color:var(--lk-500);
     border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 16px}
@@ -51,6 +61,24 @@
   .msg-ok{background:#E3F3EA;color:var(--go)}
   .msg-info{background:var(--mg-50);color:var(--mg-700)}
   .driver-card{background:var(--lk-50);border-radius:var(--r);padding:16px;margin-bottom:14px}
+  .forwhom{margin:4px 0 12px}
+  .forwhom .fw-label{font-size:13px;color:var(--muted);margin-bottom:6px}
+  .forwhom .pm{margin-bottom:8px}
+  .forwhom input{width:100%;margin-bottom:8px}
+  .pin-row{display:flex;align-items:center;gap:10px;margin:-4px 0 12px}
+  .pin-row .btn{padding:7px 12px;font-size:13px;white-space:nowrap}
+  .pin-row .fw-note{margin:0}
+  .fw-note{font-size:12.5px;color:var(--mg-700);margin:-2px 0 8px}
+  .ride-tabs{display:flex;gap:6px;overflow-x:auto;margin-bottom:12px;padding-bottom:4px}
+  .ride-tabs button{flex:none;padding:8px 12px;border:1.5px solid var(--line);border-radius:999px;
+    background:#fff;font-family:inherit;font-size:13px;font-weight:600;cursor:pointer;color:var(--ink);white-space:nowrap}
+  .ride-tabs button.on{border-color:var(--lk-500);background:var(--lk-50);color:var(--lk-700)}
+  .dc-row{display:flex;gap:14px;align-items:center}
+  .dc-photo{width:64px;height:64px;border-radius:50%;object-fit:cover;flex:none;background:var(--lk-500)}
+  .dc-init{display:flex;align-items:center;justify-content:center;color:#fff;font-weight:800;font-size:26px}
+  .plate{display:inline-block;margin-top:6px;padding:3px 10px;border:2px solid var(--ink);border-radius:6px;
+    font-weight:900;letter-spacing:1.5px;font-size:16px;background:#fff}
+
   .svc-tabs{display:flex;gap:7px}
   .svc-tabs button{flex:1;padding:11px 4px;border-radius:11px;border:2px solid transparent;
     background:var(--surface);color:var(--ink-2);font-family:inherit;font-size:13.5px;

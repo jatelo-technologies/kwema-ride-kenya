@@ -38,6 +38,8 @@ const OTP_RESEND_COOLDOWN_SECONDS = 60;
 // 60-day window quietly broke that for anyone who did not open the app for
 // two months — they got an SMS charge and a re-verification for no reason.
 const REFRESH_TTL_DAYS = 180;
+/** A just-rotated refresh token stays replayable this long (lost-response retries). */
+const REFRESH_GRACE_SECONDS = 120;
 
 /**
  * Tests membership of a Postgres role array.
@@ -161,6 +163,16 @@ export class AuthService {
     const stored = await this.redis.hgetall(key);
 
     if (!stored?.userId) {
+      // A phone on a weak signal often loses the *response* to a refresh that
+      // the server already completed. Its retry then presents a token we have
+      // just rotated. Within a short window we hand back the same new pair
+      // instead of treating it as theft, which used to sign people out and
+      // ask for a fresh SMS code.
+      const grace = await this.redis.get(`refresh:grace:${tokenHash}`);
+      if (grace) {
+        const parsed = JSON.parse(grace) as { deviceId: string; tokens: { accessToken: string; refreshToken: string } };
+        if (parsed.deviceId === deviceId) return parsed.tokens;
+      }
       // Unknown or already-rotated token. If we recognise the family, this is
       // a replay of a stolen token — kill every session in that family.
       const family = await this.redis.get(`refresh:used:${tokenHash}`);
@@ -179,8 +191,10 @@ export class AuthService {
     }
 
     const [user] = await this.db.query(
-      `SELECT u.*, d.id AS driver_id FROM users u
+      `SELECT u.*, d.id AS driver_id, v.category AS vehicle_category
+         FROM users u
          LEFT JOIN drivers d ON d.user_id = u.id
+         LEFT JOIN vehicles v ON v.id = d.active_vehicle_id
         WHERE u.id = $1 AND u.status = 'active'`,
       [stored.userId],
     );
@@ -194,7 +208,14 @@ export class AuthService {
       .set(`refresh:used:${tokenHash}`, stored.family, 'EX', REFRESH_TTL_DAYS * 86_400)
       .exec();
 
-    return this.issueTokens(user, deviceId, stored.family);
+    const tokens = await this.issueTokens(user, deviceId, stored.family);
+    await this.redis.set(
+      `refresh:grace:${tokenHash}`,
+      JSON.stringify({ deviceId, tokens }),
+      'EX',
+      REFRESH_GRACE_SECONDS,
+    );
+    return tokens;
   }
 
   async logout(accessJti: string, refreshToken?: string): Promise<void> {
@@ -266,8 +287,10 @@ export class AuthService {
 
   private async findOrCreateUser(phone: string) {
     const [existing] = await this.db.query(
-      `SELECT u.*, d.id AS driver_id FROM users u
+      `SELECT u.*, d.id AS driver_id, v.category AS vehicle_category
+         FROM users u
          LEFT JOIN drivers d ON d.user_id = u.id
+         LEFT JOIN vehicles v ON v.id = d.active_vehicle_id
         WHERE u.phone = $1 AND u.deleted_at IS NULL`,
       [phone],
     );

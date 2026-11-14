@@ -9,5 +9,6 @@ import { MessagesController } from './messages.controller';
   imports: [AuthModule, forwardRef(() => RealtimeModule)],
   controllers: [MessagesController],
   providers: [MessagesService],
+  exports: [MessagesService],
 })
 export class MessagesModule {}

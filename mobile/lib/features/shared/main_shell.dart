@@ -8,7 +8,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/comms/call_controller.dart';
 import '../../core/l10n/localization.dart';
+import 'call_overlay.dart';
 import 'account_screen.dart';
 import 'activity_screen.dart';
 
@@ -28,16 +30,24 @@ class _MainShellState extends ConsumerState<MainShell> {
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
+    // Created here so incoming calls are heard on every screen of the app.
+    ref.watch(callControllerProvider.select((c) => c.phase));
 
     return Scaffold(
-      body: IndexedStack(
+      body: Stack(children: [
+        IndexedStack(
         index: _index,
         children: [
           widget.home,
           ActivityScreen(isDriver: widget.isDriver),
           AccountScreen(isDriver: widget.isDriver),
         ],
-      ),
+        ),
+        const Positioned(
+          top: 0, left: 12, right: 12,
+          child: CallOverlay(),
+        ),
+      ]),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _index,
         onDestinationSelected: (i) => setState(() => _index = i),

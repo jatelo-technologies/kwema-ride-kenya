@@ -95,6 +95,14 @@ class OfflineLocationQueue {
 
   StreamSubscription<Position>? _positionSub;
   Timer? _flushTimer;
+  Timer? _presenceTimer;
+  DateTime _lastFixAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  final _positions = StreamController<Position>.broadcast();
+
+  /// Every accepted GPS fix, for the driver's own map. One stream feeds both
+  /// the server and the screen, so they cannot disagree.
+  Stream<Position> get positions => _positions.stream;
 
   int _seq = 0;
   Position? _lastSent;
@@ -109,6 +117,11 @@ class OfflineLocationQueue {
   static const int _maxBufferedFixes = 2000; // ~2h at the slow cadence
   static const Duration _flushInterval = Duration(seconds: 4);
   static const int _batchSize = 50;
+
+  /// A parked phone gets no GPS callbacks (the OS reports movement only), so
+  /// without this a driver waiting for the next job fell silent, was marked
+  /// offline after 90 s, and received nothing until the app was restarted.
+  static const Duration _presenceInterval = Duration(seconds: 20);
 
   /// Distance filters by movement state. A driver crawling in Kariakoo
   /// traffic still needs fine granularity; one on the highway does not.
@@ -175,6 +188,8 @@ class OfflineLocationQueue {
     });
 
     _flushTimer = Timer.periodic(_flushInterval, (_) => flush());
+    _presenceTimer =
+        Timer.periodic(_presenceInterval, (_) => unawaited(_presencePing()));
 
     // Drain whatever survived the last session before sending anything new.
     unawaited(flush(includeBackfill: true));
@@ -182,8 +197,11 @@ class OfflineLocationQueue {
 
   Future<void> stop() async {
     await _positionSub?.cancel();
+    _positionSub = null;
     _flushTimer?.cancel();
+    _presenceTimer?.cancel();
     await flush(includeBackfill: true); // last-gasp drain
+    if (!_positions.isClosed) await _positions.close();
   }
 
   void setActiveRide(String? rideId) => _activeRideId = rideId;
@@ -194,7 +212,34 @@ class OfflineLocationQueue {
 
   Future<void> _onPosition(Position position) async {
     if (!_shouldRecord(position)) return;
+    await _record(position);
+  }
 
+  /// Sends a fix even though the phone has not moved, if nothing has gone out
+  /// recently. Uses the freshest reading available, falling back to the last
+  /// one sent.
+  Future<void> _presencePing() async {
+    if (_positionSub == null) return;
+    if (DateTime.now().difference(_lastFixAt) < const Duration(seconds: 18)) {
+      return;
+    }
+    Position? p;
+    try {
+      p = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.high,
+            timeLimit: Duration(seconds: 8)),
+      );
+    } catch (_) {
+      p = await Geolocator.getLastKnownPosition() ?? _lastSent;
+    }
+    if (p == null || p.accuracy > 100) return;
+    await _record(p, force: true);
+  }
+
+  Future<void> _record(Position position, {bool force = false}) async {
+    _lastFixAt = DateTime.now();
+    if (!_positions.isClosed) _positions.add(position);
     _seq += 1;
     final fix = LocationFix(
       seq: _seq,
@@ -203,7 +248,9 @@ class OfflineLocationQueue {
       headingDeg: position.heading.isNaN ? 0 : position.heading.round() % 360,
       speedKph: position.speed.isNaN ? 0 : (position.speed * 3.6).round(),
       accuracyM: position.accuracy.round(),
-      recordedAt: position.timestamp,
+      // A forced presence fix is stamped now: a cached reading can be old,
+      // and an old timestamp would be treated as an outage replay.
+      recordedAt: force ? DateTime.now() : position.timestamp,
       rideId: _activeRideId,
     );
 

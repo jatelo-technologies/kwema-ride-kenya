@@ -16,6 +16,7 @@ import '../../core/l10n/localization.dart';
 import '../../core/network/api_client.dart';
 import '../../core/theme/app_theme.dart';
 import '../driver/driver_controller.dart';
+import '../driver/pay_commission_sheet.dart';
 import 'emergency_contact_sheet.dart';
 import 'profile_photo.dart';
 import '../../core/country_config.dart';
@@ -171,6 +172,17 @@ class AccountScreen extends ConsumerWidget {
                         'amount': formatMoney(wallet.debtCeilingCents),
                       }),
                       style: theme.textTheme.bodySmall,
+                    ),
+                    const SizedBox(height: 10),
+                    SizedBox(
+                      height: 44,
+                      child: FilledButton.icon(
+                        style: FilledButton.styleFrom(
+                            minimumSize: const Size(0, 44)),
+                        onPressed: () => PayCommissionSheet.show(context),
+                        icon: const Icon(Icons.payments_outlined, size: 18),
+                        label: Text(l10n.translate('commission.pay_now')),
+                      ),
                     ),
                   ],
                 ),

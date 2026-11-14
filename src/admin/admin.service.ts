@@ -13,6 +13,7 @@ import Redis from 'ioredis';
 
 import { REDIS } from '../common/redis.module';
 import { country } from '../common/country';
+import { PoolService } from '../pool/pool.service';
 
 @Injectable()
 export class AdminService {
@@ -21,6 +22,7 @@ export class AdminService {
   constructor(
     private readonly db: DataSource,
     @Inject(REDIS) private readonly redis: Redis,
+    private readonly pool: PoolService,
   ) {}
 
   // ===================================================================
@@ -92,6 +94,7 @@ export class AdminService {
         receivableCents: Number(fleet.receivable_cents),
       },
       users: { total: Number(riders.total) },
+      pool: await this.pool.stats(country.timezone),
     };
   }
 
@@ -204,9 +207,10 @@ export class AdminService {
   /**
    * Creates a driver profile and vehicle for an existing user account.
    *
-   * The account must already exist — the person signs up in the app with
-   * their own phone first, which means the number is verified before it is
-   * ever attached to a vehicle.
+   * The admin can add a driver directly: if no account exists for the number
+   * one is created here, so the driver never has to install the rider app
+   * first. The number is verified when the driver first signs in to the
+   * driver app with the SMS code, which attaches to this same account.
    */
   async createDriver(input: {
     phone: string;
@@ -224,15 +228,27 @@ export class AdminService {
     insurancePolicyNo: string;
     insuranceExpiry: string;
     homeCity?: string;
+    fullName?: string;
   }) {
-    const [user] = await this.db.query(
+    let [user] = await this.db.query(
       `SELECT id, full_name FROM users WHERE phone = $1 AND deleted_at IS NULL`,
       [input.phone],
     );
     if (!user) {
-      throw new BadRequestException(
-        'no account for that number — the driver must sign up in the app first',
+      // Created active but unverified: the first SMS-code sign-in proves the
+      // number and marks it verified (see AuthService.findOrCreateUser).
+      [user] = await this.db.query(
+        `INSERT INTO users (phone, full_name, status, referral_code)
+         VALUES ($1, $2, 'active', upper(substr(md5(random()::text), 1, 8)))
+         RETURNING id, full_name`,
+        [input.phone, (input.fullName ?? '').trim()],
       );
+    } else if (input.fullName && !String(user.full_name ?? '').trim()) {
+      await this.db.query(`UPDATE users SET full_name = $2 WHERE id = $1`, [
+        user.id,
+        input.fullName.trim(),
+      ]);
+      user.full_name = input.fullName.trim();
     }
 
     const [existing] = await this.db.query(
@@ -321,6 +337,7 @@ export class AdminService {
               r.pickup_address, r.dropoff_address,
               r.quoted_fare_cents, r.final_fare_cents, r.commission_cents,
               r.payment_method, r.is_paid, r.surge_multiplier,
+              r.pool_mode, r.pool_shared_with, r.pool_discount_cents,
               rider.full_name AS rider_name, rider.phone AS rider_phone,
               du.full_name AS driver_name
          FROM rides r

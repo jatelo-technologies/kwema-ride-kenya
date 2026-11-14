@@ -22,7 +22,18 @@ PLIST_KEYS = {
         'Kwema Ride uses your location so drivers can reach you and trips are tracked.',
     'NSCameraUsageDescription': 'Kwema Ride uses the camera for your profile photo.',
     'NSPhotoLibraryUsageDescription': 'Kwema Ride uses your photos for your profile picture.',
+    # In-app audio calls between rider and driver.
+    'NSMicrophoneUsageDescription': 'Kwema Ride uses the microphone for calls with your driver or rider.',
 }
+
+# permission_handler compiles each iOS permission in only when its macro is
+# set in the Podfile; without them every request comes back "denied".
+PERMISSION_MACROS = [
+    'PERMISSION_LOCATION=1',
+    'PERMISSION_LOCATION_WHENINUSE=0',
+    'PERMISSION_MICROPHONE=1',
+    'PERMISSION_NOTIFICATIONS=1',
+]
 
 
 def main() -> int:
@@ -52,6 +63,21 @@ def main() -> int:
         p = p.replace('</dict>\n</plist>', add + '</dict>\n</plist>')
     plist.write_text(p, encoding='utf-8')
     print('  Info.plist updated')
+
+    podfile = Path('ios/Podfile')
+    if podfile.exists():
+        pf = podfile.read_text(encoding='utf-8')
+        if 'PERMISSION_MICROPHONE' not in pf:
+            macros = ', '.join(f"'{m}'" for m in PERMISSION_MACROS)
+            hook = (
+                "    target.build_configurations.each do |config|\n"
+                "      config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] ||= ['$(inherited)']\n"
+                f"      config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] += [{macros}]\n"
+                "    end\n"
+            )
+            pf, k = re.subn(r'(flutter_additional_ios_build_settings\(target\)\n)', r'\1' + hook.replace('\\', '\\\\'), pf, count=1)
+            podfile.write_text(pf, encoding='utf-8')
+            print(f'  Podfile permission macros added ({k})')
 
     # Maps SDK key. Insert at the top of didFinishLaunchingWithOptions so it
     # works with both the classic and the implicit-engine AppDelegate.

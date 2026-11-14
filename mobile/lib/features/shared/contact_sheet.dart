@@ -1,41 +1,34 @@
-/// Contact the other person on a trip: call, copy the number, or message.
+/// Talk to the other person on a live trip, inside the app.
 ///
-/// Three ways, because people differ and networks differ:
-///  * Call — opens the phone dialler with the real number (only returned by
-///    the server for a live trip).
-///  * Copy — puts the number on the clipboard to paste into the dialler,
-///    WhatsApp or anywhere else.
-///  * Message — in-app chat. Works on weak data where a call will not, and
-///    leaves a record both sides can read back.
-///
-/// In-app voice calling (over the internet) needs a calling provider account
-/// and is not part of this sheet; the Call button uses the normal network.
-///
-/// The thread refreshes every few seconds while the sheet is open. Polling is
-/// deliberate: it needs no socket plumbing in this widget and costs a few
-/// hundred bytes per tick.
+/// Text messages and an audio call, and nothing else: no phone numbers are
+/// shown or exchanged, and both stop being available when the trip ends. The
+/// thread updates live over the realtime socket, with a slow poll underneath
+/// so a missed socket event never leaves the chat stale.
 
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:url_launcher/url_launcher.dart';
 
+import '../../core/auth/auth_controller.dart';
+import '../../core/comms/call_controller.dart';
 import '../../core/l10n/localization.dart';
 import '../../core/network/api_client.dart';
+import '../rider/rider_controller.dart' show socketClientProvider;
 
 class ContactSheet extends ConsumerStatefulWidget {
-  const ContactSheet({super.key, required this.rideId});
+  const ContactSheet({super.key, required this.rideId, this.peerName});
 
   final String rideId;
+  final String? peerName;
 
-  static Future<void> show(BuildContext context, String rideId) =>
+  static Future<void> show(BuildContext context, String rideId,
+          {String? peerName}) =>
       showModalBottomSheet<void>(
         context: context,
         isScrollControlled: true,
         showDragHandle: true,
-        builder: (_) => ContactSheet(rideId: rideId),
+        builder: (_) => ContactSheet(rideId: rideId, peerName: peerName),
       );
 
   @override
@@ -54,40 +47,44 @@ class _ContactSheetState extends ConsumerState<ContactSheet> {
   final _scroll = ScrollController();
   List<_Msg> _messages = const [];
   String? _name;
-  String? _phone;
   String? _error;
   bool _sending = false;
+  bool _live = true;
   Timer? _timer;
+  StreamSubscription<Map<String, dynamic>>? _sub;
 
   @override
   void initState() {
     super.initState();
-    _loadContact();
+    _name = widget.peerName;
+    _loadPeer();
     _refresh();
-    _timer = Timer.periodic(const Duration(seconds: 4), (_) => _refresh());
+    _timer = Timer.periodic(const Duration(seconds: 8), (_) => _refresh());
+    _sub = ref.read(socketClientProvider).messages.listen((m) {
+      if (m['rideId']?.toString() == widget.rideId) _refresh();
+    });
   }
 
   @override
   void dispose() {
     _timer?.cancel();
+    _sub?.cancel();
     _input.dispose();
     _scroll.dispose();
     super.dispose();
   }
 
-  Future<void> _loadContact() async {
+  Future<void> _loadPeer() async {
     try {
       final res = await ref
           .read(apiClientProvider)
-          .get('/rides/${widget.rideId}/contact');
+          .get('/rides/${widget.rideId}/counterpart');
       if (!mounted) return;
       setState(() {
-        _name = (res as Map)['name']?.toString();
-        _phone = res['phone']?.toString();
+        _name = (res as Map)['name']?.toString() ?? _name;
+        _live = res['live'] == true;
       });
-    } catch (_) {
-      // Not available (trip not live yet). Messaging may still work.
-    }
+    } catch (_) {}
   }
 
   Future<void> _refresh() async {
@@ -142,6 +139,9 @@ class _ContactSheetState extends ConsumerState<ContactSheet> {
     final l10n = AppLocalizations.of(context);
     final theme = Theme.of(context);
     final insets = MediaQuery.of(context).viewInsets.bottom;
+    // The auth provider is watched so the sheet closes with a sign-out.
+    ref.watch(authControllerProvider);
+    final call = ref.watch(callControllerProvider);
 
     return Padding(
       padding: EdgeInsets.only(bottom: insets),
@@ -159,24 +159,18 @@ class _ContactSheetState extends ConsumerState<ContactSheet> {
                         ?.copyWith(fontWeight: FontWeight.w700),
                   ),
                 ),
-                if (_phone != null) ...[
-                  IconButton.filled(
-                    tooltip: l10n.translate('contact.call'),
-                    icon: const Icon(Icons.phone, size: 20),
-                    onPressed: () => launchUrl(Uri.parse('tel:$_phone')),
-                  ),
-                  const SizedBox(width: 8),
-                  IconButton.outlined(
-                    tooltip: l10n.translate('contact.copy'),
-                    icon: const Icon(Icons.copy, size: 20),
-                    onPressed: () async {
-                      await Clipboard.setData(ClipboardData(text: _phone!));
-                      if (!context.mounted) return;
-                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                          content: Text(l10n.translate('contact.copied'))));
-                    },
-                  ),
-                ],
+                IconButton.filled(
+                  tooltip: l10n.translate('contact.call'),
+                  icon: const Icon(Icons.call, size: 20),
+                  onPressed: (!_live || call.busy)
+                      ? null
+                      : () {
+                          ref
+                              .read(callControllerProvider.notifier)
+                              .start(widget.rideId, peerName: _name);
+                          Navigator.of(context).pop();
+                        },
+                ),
               ]),
               const SizedBox(height: 8),
               Expanded(
@@ -231,6 +225,7 @@ class _ContactSheetState extends ConsumerState<ContactSheet> {
                     controller: _input,
                     maxLength: 500,
                     maxLines: 1,
+                    enabled: _live,
                     textInputAction: TextInputAction.send,
                     onSubmitted: (_) => _send(),
                     decoration: InputDecoration(
@@ -243,7 +238,7 @@ class _ContactSheetState extends ConsumerState<ContactSheet> {
                 IconButton.filled(
                   tooltip: l10n.translate('contact.send'),
                   icon: const Icon(Icons.send, size: 20),
-                  onPressed: _sending ? null : _send,
+                  onPressed: (_sending || !_live) ? null : _send,
                 ),
               ]),
             ],

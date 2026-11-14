@@ -25,8 +25,24 @@ PERMISSIONS = [
     'android.permission.FOREGROUND_SERVICE',
     'android.permission.FOREGROUND_SERVICE_LOCATION',
     'android.permission.WAKE_LOCK',
-    # Android 13+: required before the app may show push notifications.
+    # Driver app: keep reporting position and receiving requests with the
+    # screen off or another app (navigation, WhatsApp) in front.
+    'android.permission.ACCESS_BACKGROUND_LOCATION',
+    # Android 13+: required for the "You are online" notification that keeps
+    # the background service visible and alive.
     'android.permission.POST_NOTIFICATIONS',
+    # Lets the driver app ask to be exempt from battery optimisation, which
+    # cheaper phones use to kill background apps.
+    'android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
+    # In-app audio calls between rider and driver.
+    'android.permission.RECORD_AUDIO',
+    'android.permission.MODIFY_AUDIO_SETTINGS',
+    'android.permission.BLUETOOTH_CONNECT',
+    'android.permission.ACCESS_NETWORK_STATE',
+    # Driver app: a ride request lights the screen and opens over the lock
+    # screen.
+    'android.permission.USE_FULL_SCREEN_INTENT',
+    'android.permission.VIBRATE',
 ]
 
 
@@ -50,6 +66,17 @@ def main() -> int:
     if block:
         xml = re.sub(r'(<manifest[^>]*>)', r'\1\n' + block.rstrip(), xml, count=1)
 
+    # Package visibility (Android 11+): needed to hand a destination to Google
+    # Maps for spoken navigation.
+    if '<queries>' not in xml:
+        queries = (
+            '\n    <queries>\n'
+            '        <intent><action android:name="android.intent.action.VIEW"/>'
+            '<data android:scheme="https"/></intent>\n'
+            '    </queries>'
+        )
+        xml = re.sub(r'(<application)', queries.lstrip('\n') + r'\n    \1', xml, count=1)
+
     if 'com.google.android.geo.API_KEY' in xml:
         # Replace the existing value rather than adding a second meta-data
         # element, which would make the merged manifest ambiguous.
@@ -67,6 +94,16 @@ def main() -> int:
         )
         xml = re.sub(r'(<application[^>]*>)', r'\1' + meta, xml, count=1)
         key_action = 'inserted'
+
+    # Let the main activity show over the lock screen and switch the screen
+    # on, which is what makes a ride request interrupt a sleeping phone.
+    def _activity(match):
+        tag = match.group(0)
+        for attr in ('showWhenLocked', 'turnScreenOn'):
+            if f'android:{attr}' not in tag:
+                tag = tag.replace('<activity', f'<activity android:{attr}="true"', 1)
+        return tag
+    xml = re.sub(r'<activity\b[^>]*android:name="[^"]*MainActivity"[^>]*>', _activity, xml, count=1)
 
     with open(path, 'w', encoding='utf-8') as handle:
         handle.write(xml)

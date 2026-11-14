@@ -26,13 +26,8 @@ import { DataSource } from 'typeorm';
 import Redis from 'ioredis';
 
 import { REDIS } from '../common/redis.module';
-import { country } from '../common/country';
 
-/** Base debt ceiling in cents (per country profile). */
-const BASE_DEBT_CEILING_CENTS = country.cashDebtCeilingCents;
-/** Additional headroom per completed trip, capped. */
-const HEADROOM_PER_TRIP_CENTS = 5_000;
-const MAX_DEBT_CEILING_CENTS = country.cashDebtMaxCeilingCents;
+import { debtCeilingFor, debtLimitEnforced } from '../common/debt';
 
 @Injectable()
 export class CashService {
@@ -66,16 +61,11 @@ export class CashService {
 
     const commission = Number(ride.commission_cents ?? 0);
 
+    // The commission was booked against the wallet when the trip completed
+    // (rides.service), so confirming the cash only records that it was
+    // collected. Debiting here as well charged every cash trip twice.
     await this.db.transaction(async (manager) => {
       await manager.query(`UPDATE rides SET is_paid = TRUE WHERE id = $1`, [rideId]);
-
-      // The driver holds the fare, so the platform's share is a debt.
-      await manager.query(
-        `UPDATE drivers
-            SET wallet_balance_cents = wallet_balance_cents - $2
-          WHERE id = $1`,
-        [driverId, commission],
-      );
 
       await manager.query(
         `INSERT INTO transactions
@@ -116,7 +106,7 @@ export class CashService {
     const balance = Number(driver.wallet_balance_cents);
     const ceiling = this.debtCeiling(Number(driver.completed_trips));
     const debt = balance < 0 ? -balance : 0;
-    const isBlocked = debt >= ceiling;
+    const isBlocked = debtLimitEnforced() && debt >= ceiling;
 
     // Dispatch reads this floor from Redis rather than hitting Postgres on
     // every candidate scoring pass.
@@ -140,10 +130,7 @@ export class CashService {
    * established one considerably more, because they turn it over faster.
    */
   private debtCeiling(completedTrips: number): number {
-    return Math.min(
-      BASE_DEBT_CEILING_CENTS + completedTrips * HEADROOM_PER_TRIP_CENTS,
-      MAX_DEBT_CEILING_CENTS,
-    );
+    return debtCeilingFor(completedTrips);
   }
 
   /**

@@ -1,5 +1,6 @@
 import { Controller, Get } from '@nestjs/common';
 import { country } from '../common/country';
+import { POOL, POOL_SEATS } from '../pool/pool.config';
 
 /**
  * Public runtime configuration for the website.
@@ -32,6 +33,7 @@ export class ConfigController {
       languages: country.languages,
       paymentMethods: ['mobile_money', 'card', 'cash'],
       mobileNetworks: country.mobileNetworks,
+      pool: { enabled: POOL.enabled, seats: POOL_SEATS, discountBps: POOL.discountBps },
       apps: {
         rider: {
           ios: process.env.RIDER_IOS_URL ?? null,

@@ -1,10 +1,11 @@
 /**
- * In-ride messaging between the rider and their driver.
+ * In-ride communication between a rider and their driver: text chat and the
+ * rules for who may call whom.
  *
- * Only the two people on a trip can read or write its thread, and only while
- * the trip is live (or just finished, so "I left my bag" still reaches the
- * driver). Numbers are shared the same way: the counterpart's phone is
- * returned by contact() only for a live trip, never as a directory lookup.
+ * The only channel between the two people is inside the app, and only while
+ * their trip is live. Nobody's phone number is ever returned by this module.
+ * Once the trip ends, the thread is closed for new messages (the history stays
+ * readable to the two participants for disputes and lost-property follow-up).
  */
 
 import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
@@ -12,15 +13,12 @@ import { DataSource } from 'typeorm';
 
 import { NotificationsService } from '../notifications/notifications.service';
 
-const LIVE_STATUSES = ['accepted', 'arrived', 'in_progress'];
-/** After completion the thread stays open this long. */
-const GRACE_MINUTES = 30;
+export const LIVE_STATUSES = ['accepted', 'arrived', 'in_progress'];
 
 interface Party {
   riderId: string;
   driverUserId: string | null;
   status: string;
-  closedRecently: boolean;
 }
 
 @Injectable()
@@ -30,28 +28,34 @@ export class MessagesService {
     private readonly push: NotificationsService,
   ) {}
 
-  private async party(rideId: string): Promise<Party> {
+  async party(rideId: string): Promise<Party> {
     const [r] = await this.db.query(
-      `SELECT r.rider_id, d.user_id AS driver_user_id, r.status::text AS status,
-              (r.completed_at IS NOT NULL
-                 AND r.completed_at > now() - ($2 || ' minutes')::interval) AS closed_recently
+      `SELECT r.rider_id, d.user_id AS driver_user_id, r.status::text AS status
          FROM rides r LEFT JOIN drivers d ON d.id = r.driver_id
         WHERE r.id = $1`,
-      [rideId, String(GRACE_MINUTES)],
+      [rideId],
     );
     if (!r) throw new NotFoundException('ride not found');
-    return {
-      riderId: r.rider_id,
-      driverUserId: r.driver_user_id,
-      status: r.status,
-      closedRecently: !!r.closed_recently,
-    };
+    return { riderId: r.rider_id, driverUserId: r.driver_user_id, status: r.status };
   }
 
   private assertParticipant(p: Party, userId: string) {
     if (userId !== p.riderId && userId !== p.driverUserId) {
       throw new ForbiddenException('not part of this trip');
     }
+  }
+
+  /** The other person on a live trip, or null when `userId` may not signal. */
+  async liveCounterpart(rideId: string, userId: string): Promise<string | null> {
+    let p: Party;
+    try {
+      p = await this.party(rideId);
+    } catch {
+      return null;
+    }
+    if (userId !== p.riderId && userId !== p.driverUserId) return null;
+    if (!LIVE_STATUSES.includes(p.status)) return null;
+    return userId === p.riderId ? p.driverUserId : p.riderId;
   }
 
   async list(rideId: string, userId: string, after?: string) {
@@ -73,47 +77,54 @@ export class MessagesService {
     }));
   }
 
-  /** Stores a message and returns it with the recipient so callers can fan out. */
   async send(rideId: string, userId: string, body: string) {
     const p = await this.party(rideId);
     this.assertParticipant(p, userId);
-    if (!LIVE_STATUSES.includes(p.status) && !p.closedRecently) {
-      throw new ForbiddenException('messaging is closed for this trip');
+    if (!LIVE_STATUSES.includes(p.status)) {
+      throw new ForbiddenException('messaging is only open during a trip');
     }
-
     const text = body.trim().slice(0, 500);
+    if (!text) throw new ForbiddenException('empty message');
     const [m] = await this.db.query(
       `INSERT INTO ride_messages (ride_id, sender_id, body)
        VALUES ($1, $2, $3) RETURNING id, created_at`,
       [rideId, userId, text],
     );
-
-    const recipient = userId === p.riderId ? p.driverUserId : p.riderId;
-    const recipientApp: 'rider' | 'driver' = userId === p.riderId ? 'driver' : 'rider';
-    if (recipient) {
+    const recipientId = userId === p.riderId ? p.driverUserId : p.riderId;
+    // A push as well, for when the other person's app is in the background.
+    if (recipientId) {
       void this.push.sendToUser(
-        recipient,
-        {
-          title: 'push.message.t',
-          bodyText: text.slice(0, 120),
-          data: { type: 'ride_message', rideId },
-        },
-        recipientApp,
+        recipientId,
+        { title: 'push.message.t', bodyText: text.slice(0, 120), data: { type: 'ride_message', rideId } },
+        userId === p.riderId ? 'driver' : 'rider',
       );
     }
-    return { id: m.id, at: m.created_at, body: text, recipientId: recipient };
+    return { id: m.id, at: m.created_at, body: text, recipientId };
   }
 
-  /** The other party's name and number, for a normal phone call. Live trips only. */
-  async contact(rideId: string, userId: string) {
+  /** Who the rider is talking to / who the driver is talking to — name only. */
+  async counterpart(rideId: string, userId: string) {
     const p = await this.party(rideId);
     this.assertParticipant(p, userId);
-    if (!LIVE_STATUSES.includes(p.status)) {
-      throw new ForbiddenException('contact details are only available during a trip');
-    }
     const otherId = userId === p.riderId ? p.driverUserId : p.riderId;
     if (!otherId) throw new NotFoundException('no driver assigned yet');
-    const [u] = await this.db.query(`SELECT full_name, phone FROM users WHERE id = $1`, [otherId]);
-    return { name: u?.full_name ?? null, phone: u?.phone ?? null };
+    const [u] = await this.db.query(`SELECT full_name FROM users WHERE id = $1`, [otherId]);
+    return { name: u?.full_name ?? null, live: LIVE_STATUSES.includes(p.status) };
+  }
+
+  /** ICE servers for in-app audio calls. TURN is optional but strongly advised. */
+  iceServers() {
+    const servers: Array<{ urls: string[]; username?: string; credential?: string }> = [
+      { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+    ];
+    const turn = (process.env.TURN_URLS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+    if (turn.length) {
+      servers.push({
+        urls: turn,
+        username: process.env.TURN_USERNAME,
+        credential: process.env.TURN_CREDENTIAL,
+      });
+    }
+    return servers;
   }
 }

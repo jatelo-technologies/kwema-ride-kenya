@@ -24,6 +24,7 @@ import Redis from 'ioredis';
 import { REDIS } from '../common/redis.module';
 import { VehicleCategory } from '../dispatch/dispatch.service';
 import { country } from '../common/country';
+import { POOL, discountBpsFor, isPoolCategory, poolSeatsFor } from '../pool/pool.config';
 
 export interface Tariff {
   id: string;
@@ -56,6 +57,26 @@ export interface FareInput {
   /** Airport/zone pickup surcharge, resolved from service_zones. */
   zoneSurchargeCents?: number;
   promoDiscountCents?: number;
+  /**
+   * Car-pool discount in basis points, taken off the fare for this rider's own
+   * leg. Only passed at settlement, and only when another rider was really on
+   * board at the same time. Quotes never carry it: the quoted figure is the
+   * solo fare, the ceiling no pool rider can exceed.
+   */
+  poolDiscountBps?: number;
+  /** Quote only: also price the shared fare so the app can show it. */
+  pool?: boolean;
+}
+
+/** What a rider is shown for a pooled trip before it starts. */
+export interface PoolPreview {
+  seats: number;
+  /** Fare if one other rider shares part of the trip. */
+  sharedFareCents: number;
+  /** Fare if the vehicle fills up (the deepest discount tier). */
+  bestFareCents: number;
+  minDiscountBps: number;
+  maxDiscountBps: number;
 }
 
 export interface FareBreakdown {
@@ -74,6 +95,8 @@ export interface FareBreakdown {
   surgeAmountCents: number;
   minimumFareAppliedCents: number;
   promoDiscountCents: number;
+  /** Car-pool discount actually applied, 0 for a solo trip. */
+  poolDiscountCents: number;
 
   bookingFeeCents: number;
   /** Total the rider pays. */
@@ -114,16 +137,40 @@ export class FareService {
    * ride by quote id, so the price they saw is the price that binds — a
    * surge spike between tapping and confirming cannot raise it.
    */
-  async quote(input: FareInput): Promise<{ quoteId: string; fare: FareBreakdown; expiresAt: Date }> {
+  async quote(
+    input: FareInput,
+  ): Promise<{ quoteId: string; fare: FareBreakdown; expiresAt: Date; poolPreview?: PoolPreview }> {
     const surge = await this.currentSurge(input.pickup, input.category);
-    const fare = await this.calculate({ ...input, lockedSurge: surge });
+    const fare = await this.calculate({ ...input, lockedSurge: surge, poolDiscountBps: 0 });
+
+    // Pool preview: the same trip priced at the first and deepest discount
+    // tiers. The bound quote stays the solo fare.
+    let poolPreview: PoolPreview | undefined;
+    if (
+      input.pool &&
+      POOL.enabled &&
+      (input.serviceType ?? 'ride') === 'ride' &&
+      isPoolCategory(input.category)
+    ) {
+      const minBps = discountBpsFor(1);
+      const maxBps = discountBpsFor(POOL.discountBps.length + 1);
+      const shared = await this.calculate({ ...input, lockedSurge: surge, poolDiscountBps: minBps });
+      const best = await this.calculate({ ...input, lockedSurge: surge, poolDiscountBps: maxBps });
+      poolPreview = {
+        seats: poolSeatsFor(input.category),
+        sharedFareCents: shared.totalFareCents,
+        bestFareCents: best.totalFareCents,
+        minDiscountBps: minBps,
+        maxDiscountBps: maxBps,
+      };
+    }
 
     const quoteId = `q_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
     const ttlSeconds = 180;
 
     await this.redis.set(
       `quote:${quoteId}`,
-      JSON.stringify({ input, fare }),
+      JSON.stringify({ input, fare, poolPreview }),
       'EX',
       ttlSeconds,
     );
@@ -132,6 +179,7 @@ export class FareService {
       quoteId,
       fare,
       expiresAt: new Date(Date.now() + ttlSeconds * 1000),
+      poolPreview,
     };
   }
 
@@ -193,7 +241,15 @@ export class FareService {
     // Discounts come out of the operator's margin, never the driver's: the
     // driver is paid on the pre-discount fare.
     const promoDiscountCents = Math.min(input.promoDiscountCents ?? 0, afterMinimum);
-    const fareBeforeBooking = afterMinimum;
+
+    // ---- Car-pool discount --------------------------------------------
+    // Taken off the fare itself, before the booking fee and commission are
+    // worked out, so both shrink with it and the regulator's percentage
+    // ceilings still hold on what the rider actually pays. The driver is
+    // paid from several riders at once, which is what funds the discount.
+    const poolBps = Math.min(Math.max(0, input.poolDiscountBps ?? 0), 7_000);
+    const poolDiscountCents = Math.round((afterMinimum * poolBps) / BPS_DIVISOR);
+    const fareBeforeBooking = afterMinimum - poolDiscountCents;
 
     // ---- Booking fee --------------------------------------------------
     const bookingFeeCents = Math.round(
@@ -232,6 +288,7 @@ export class FareService {
       surgeAmountCents,
       minimumFareAppliedCents,
       promoDiscountCents,
+      poolDiscountCents,
       bookingFeeCents,
       totalFareCents,
       commissionCents,
@@ -247,6 +304,9 @@ export class FareService {
         ...(surgeAmountCents ? [{ key: 'fare.surge', amountCents: surgeAmountCents }] : []),
         ...(minimumFareAppliedCents
           ? [{ key: 'fare.minimum_adjustment', amountCents: minimumFareAppliedCents }]
+          : []),
+        ...(poolDiscountCents
+          ? [{ key: 'fare.pool_discount', amountCents: -poolDiscountCents }]
           : []),
         ...(bookingFeeCents ? [{ key: 'fare.booking', amountCents: bookingFeeCents }] : []),
         ...(promoDiscountCents ? [{ key: 'fare.promo', amountCents: -promoDiscountCents }] : []),

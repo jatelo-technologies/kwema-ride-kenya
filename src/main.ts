@@ -9,6 +9,7 @@
  */
 
 import { country } from './common/country';
+import './db/normalize-results';
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger, RequestMethod } from '@nestjs/common';
@@ -23,11 +24,27 @@ import { RedisIoAdapter } from './realtime/redis-io.adapter';
 async function bootstrap(): Promise<void> {
   const logger = new Logger('Bootstrap');
 
+  // A fault in one background task (an offer loop, a push) must be logged, not
+  // allowed to terminate the process serving every other rider and driver.
+  process.on('unhandledRejection', (reason) => {
+    logger.error(`unhandled rejection: ${reason instanceof Error ? reason.stack : String(reason)}`);
+  });
+
   // Before anything connects: a misconfigured deploy should fail here, with
   // the variable named, rather than three layers down in a driver error.
   validateEnvironment();
 
   const app = await NestFactory.create(AppModule, { bufferLogs: false });
+
+  // Behind Railway's edge proxy the socket peer is the proxy, not the user.
+  // Without this every request appears to come from one address, so the rate
+  // limiter counts the whole country as a single client. One hop is trusted:
+  // Express then takes the client address the edge appended, which a caller
+  // cannot forge by sending their own X-Forwarded-For.
+  (app.getHttpAdapter().getInstance() as any).set(
+    'trust proxy',
+    Number(process.env.TRUST_PROXY_HOPS ?? 1),
+  );
 
   // Photo uploads arrive as base64 in JSON, which inflates the payload by
   // about a third. The global 1 MB limit rejected them, so this route gets

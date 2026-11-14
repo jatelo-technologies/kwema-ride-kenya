@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Logger, Param, Post, Query, UseGuards } from '@nestjs/common';
 import {
   IsIn, IsInt, IsNumber, IsOptional, IsString, Length, Matches, Max, Min,
   ValidateNested,
@@ -43,12 +43,24 @@ class RequestRideDto {
 
   @IsOptional() @IsIn(['ride', 'parcel', 'food']) serviceType?: string;
 
+  /**
+   * Car pooling, as an extra option on a normal request.
+   *   match  look for a vehicle already going your way, else start a shared trip
+   *   host   start a shared trip that others can browse and join
+   * Omit it for an ordinary solo ride.
+   */
+  @IsOptional() @IsIn(['match', 'host']) poolMode?: string;
+
   /** Required when serviceType is parcel or food. */
   @IsOptional() @ValidateNested() @Type(() => DeliveryDto) delivery?: DeliveryDto;
   @IsString() quoteId: string;
   @IsIn(['boda', 'bajaji', 'standard', 'xl', 'express',
   'e_boda', 'e_bajaji', 'e_car']) category: string;
   @IsIn(['cash', 'mobile_money', 'card', 'wallet']) paymentMethod: string;
+
+  /** Booking for someone else: who the driver is collecting. */
+  @IsOptional() @IsString() @Length(2, 120) passengerName?: string;
+  @IsOptional() @IsString() @Length(0, 16) passengerPhone?: string;
   @ValidateNested() @Type(() => PointDto) pickup: PointDto;
   @ValidateNested() @Type(() => PointDto) dropoff: PointDto;
 }
@@ -61,6 +73,8 @@ class RequestRideDto {
 @Controller('rides')
 @UseGuards(JwtAuthGuard)
 export class RidesController {
+  private readonly logger = new Logger(RidesController.name);
+
   constructor(
     private readonly rides: RidesService,
     private readonly deliveries: DeliveriesService,
@@ -77,6 +91,9 @@ export class RidesController {
   @Post('request')
   async request(@CurrentUser() user: AuthedUser, @Body() dto: RequestRideDto) {
     const service = dto.serviceType ?? 'ride';
+    if (dto.poolMode && service !== 'ride') {
+      throw new BadRequestException('pool_unavailable');
+    }
 
     // Validated before the ride exists: creating one and then rejecting the
     // delivery detail would leave an orphaned job occupying the rider's one
@@ -97,7 +114,8 @@ export class RidesController {
     }
 
     // Dispatch runs out of band; progress reaches the client over the socket.
-    void this.rides.startDispatch(ride.id);
+    void this.rides.startDispatch(ride.id).catch((err) =>
+      this.logger.error(`dispatch failed ride=${ride.id}: ${err.message}`));
 
     return {
       ...this.rides.toWireSummary(ride),
@@ -106,6 +124,16 @@ export class RidesController {
       // it to the courier at handover.
       deliveryCode,
     };
+  }
+
+  @Get('driver/active')
+  driverActive(@CurrentUser() user: AuthedUser) {
+    return this.rides.findActiveForDriverUser(user.id);
+  }
+
+  @Get('tracking')
+  tracking(@CurrentUser() user: AuthedUser) {
+    return this.rides.trackingForRider(user.id);
   }
 
   @Get('active')

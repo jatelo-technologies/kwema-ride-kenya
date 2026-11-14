@@ -136,6 +136,20 @@ export class PaymentsController {
     return this.cash.confirmCollection(dto.rideId, user.driverId);
   }
 
+  /**
+   * Driver pays commission owed: mobile money prompt or card checkout.
+   * The wallet is credited only when the provider confirms.
+   */
+  @UseGuards(JwtAuthGuard)
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  @Post('commission/pay')
+  payCommission(
+    @CurrentUser() user: { id: string; driverId?: string; phone: string },
+    @Body() dto: { amountCents?: number; method?: 'mobile_money' | 'card'; mno?: Mno; payerPhone?: string },
+  ) {
+    return this.payments.initiateCommissionPayment(user, dto ?? {});
+  }
+
   /** Driver's current cash-commission debt position. */
   @UseGuards(JwtAuthGuard)
   @Get('cash/balance')

@@ -7,6 +7,7 @@ import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { APP_GUARD } from '@nestjs/core';
 
 import { RedisModule } from './common/redis.module';
+import { MessagesModule } from './messages/messages.module';
 import { AuthModule } from './auth/auth.module';
 import { DispatchModule } from './dispatch/dispatch.module';
 import { RealtimeModule } from './realtime/realtime.module';
@@ -25,7 +26,6 @@ import { HealthController } from './health/health.controller';
 import { StatusController } from './health/status.controller';
 import { ConfigController } from './health/config.controller';
 import { NotificationsModule } from './notifications/notifications.module';
-import { MessagesModule } from './messages/messages.module';
 import { JobsService } from './common/jobs.service';
 
 @Module({
@@ -68,7 +68,17 @@ import { JobsService } from './common/jobs.service';
     ThrottlerModule.forRoot([
       { name: 'default', ttl: 60_000, limit: 120 },
       // Anything that costs money or sends an SMS gets the strict bucket.
-      { name: 'strict', ttl: 60_000, limit: 5 },
+      // Opt-in: Nest applies every named throttler to every route, so without
+      // the skipIf the 5-per-minute strict limit capped the whole API, not
+      // just the routes that ask for it with @Throttle({ strict: ... }).
+      {
+        name: 'strict',
+        ttl: 60_000,
+        limit: 5,
+        skipIf: (ctx) =>
+          Reflect.getMetadata('THROTTLER:LIMITstrict', ctx.getHandler()) === undefined &&
+          Reflect.getMetadata('THROTTLER:LIMITstrict', ctx.getClass()) === undefined,
+      },
     ]),
 
     AuthModule,

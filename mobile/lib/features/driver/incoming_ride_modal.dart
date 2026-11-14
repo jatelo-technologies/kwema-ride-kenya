@@ -224,6 +224,38 @@ class _IncomingRideModalState extends State<IncomingRideModal> {
               style: theme.textTheme.titleMedium
                   ?.copyWith(fontWeight: FontWeight.w700),
             ),
+            if (offer.isPool) ...[
+              const SizedBox(height: 6),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.primaryContainer,
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(Icons.groups_outlined,
+                      size: 18, color: theme.colorScheme.primary),
+                  const SizedBox(width: 6),
+                  Text(
+                    offer.poolCoRiders > 0
+                        ? l10n.translate('pool.offer_badge_with', params: {
+                            'n': '${offer.poolCoRiders}',
+                          })
+                        : l10n.translate('pool.offer_badge'),
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                ]),
+              ),
+              if (offer.poolDetourM > 0) ...[
+                const SizedBox(height: 4),
+                Text(
+                  l10n.translate('pool.offer_detour',
+                      params: {'d': _formatDistance(offer.poolDetourM)}),
+                  style: theme.textTheme.bodySmall,
+                ),
+              ],
+            ],
             const SizedBox(height: 4),
 
             // Earnings up front. It is the first thing every driver looks at,

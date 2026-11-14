@@ -18,9 +18,22 @@ import * as crypto from 'node:crypto';
 
 import { RealtimeGateway } from '../realtime/realtime.gateway';
 import { MpesaProvider, MtnMomoProvider, AirtelMoneyProvider, MobileMoneyProvider, ProviderName, Mno, WebhookVerification } from './mobile-money.providers';
-import { country } from '../common/country';
+import { country, isValidPhone, PHONE_MESSAGE } from '../common/country';
 import { msg } from '../common/messages';
 import { DpoCardProvider } from './card.provider';
+import { CashService } from './cash.service';
+
+/** Smallest commission payment: 100 currency units, or the whole debt if it is less. */
+const MIN_COMMISSION_PAYMENT_CENTS = 10_000;
+
+/**
+ * TypeORM returns `[rows, affectedCount]` for UPDATE ... RETURNING and plain
+ * rows for SELECT; this reads the first row of either.
+ */
+function firstRow(res: any): any {
+  if (!Array.isArray(res) || res.length === 0) return undefined;
+  return Array.isArray(res[0]) ? res[0][0] : res[0];
+}
 
 @Injectable()
 export class PaymentsService {
@@ -34,6 +47,7 @@ export class PaymentsService {
     private readonly mtnmomo: MtnMomoProvider,
     private readonly airtelmoney: AirtelMoneyProvider,
     private readonly card: DpoCardProvider,
+    private readonly cash: CashService,
   ) {}
 
   private provider(name: ProviderName): MobileMoneyProvider {
@@ -153,6 +167,188 @@ export class PaymentsService {
   }
 
   // -------------------------------------------------------------------
+  // Commission owed by a driver (cash trips)
+  // -------------------------------------------------------------------
+
+  /**
+   * A driver pays what they owe: by mobile money (a prompt on their phone) or
+   * by card (hosted checkout). Nothing is credited here. The wallet moves only
+   * when the provider confirms, through the same idempotent paths as a ride
+   * payment, so a double tap or a replayed callback cannot pay twice.
+   */
+  async initiateCommissionPayment(
+    user: { id: string; driverId?: string; phone: string },
+    dto: { amountCents?: number; method?: 'mobile_money' | 'card'; mno?: Mno; payerPhone?: string },
+  ) {
+    if (!user.driverId) throw new ForbiddenException('drivers only');
+    const method = dto.method ?? 'mobile_money';
+    if (method !== 'mobile_money' && method !== 'card') {
+      throw new BadRequestException('method must be mobile_money or card');
+    }
+
+    const status = await this.cash.debtStatus(user.driverId);
+    if (status.debtCents <= 0) throw new BadRequestException('no_commission_owed');
+
+    // Default: clear the whole debt. A smaller amount is allowed, never more
+    // than is owed (the surplus would sit in the wallet and confuse payouts).
+    let amountCents = dto.amountCents === undefined ? status.debtCents : Math.round(Number(dto.amountCents));
+    if (!Number.isFinite(amountCents) || amountCents <= 0) throw new BadRequestException('invalid_amount');
+    amountCents = Math.min(amountCents, status.debtCents);
+    const floor = Math.min(MIN_COMMISSION_PAYMENT_CENTS, status.debtCents);
+    if (amountCents < floor) throw new BadRequestException('amount_too_small');
+
+    const phone = dto.payerPhone ?? user.phone;
+    if (method === 'mobile_money') {
+      if (!dto.mno) throw new BadRequestException('mno is required');
+      if (!isValidPhone(phone)) throw new BadRequestException(PHONE_MESSAGE);
+    }
+
+    // A prompt that is already on the handset is reused for a few minutes, so
+    // an impatient second tap does not stack a second charge.
+    const [existing] = await this.db.query(
+      `SELECT external_reference, status, method, amount_cents FROM transactions
+        WHERE user_id = $1 AND purpose = 'commission' AND method = $2
+          AND status IN ('pending', 'processing')
+          AND initiated_at > now() - interval '3 minutes'
+        ORDER BY created_at DESC LIMIT 1`,
+      [user.id, method],
+    );
+    if (existing && method === 'mobile_money') {
+      return {
+        reference: existing.external_reference,
+        status: existing.status,
+        amountCents: Number(existing.amount_cents),
+        message: msg('pay.already_active'),
+      };
+    }
+
+    const externalReference = `KWC-${crypto.randomBytes(5).toString('hex').toUpperCase()}`;
+    const [langRow] = await this.db.query(`SELECT preferred_language FROM users WHERE id = $1`, [user.id]);
+    const lang: string | undefined = langRow?.preferred_language?.trim();
+
+    if (method === 'card') {
+      await this.db.query(
+        `INSERT INTO transactions
+           (ride_id, user_id, direction, method, aggregator, amount_cents,
+            status, external_reference, payer_phone, purpose)
+         VALUES (NULL, $1, 'collection', 'card', 'dpo', $2, 'pending', $3, $4, 'commission')`,
+        [user.id, amountCents, externalReference, phone],
+      );
+      const publicUrl = process.env.PUBLIC_BASE_URL ?? '';
+      let result: Awaited<ReturnType<DpoCardProvider['createCharge']>>;
+      try {
+        result = await this.card.createCharge({
+          externalReference,
+          amountCents,
+          rideReference: 'COMMISSION',
+          customerPhone: phone,
+          redirectUrl: `${publicUrl}/api/payments/card/return?ref=${externalReference}`,
+          backUrl: `${publicUrl}/api/payments/card/cancelled?ref=${externalReference}`,
+        });
+      } catch (err) {
+        await this.db.query(
+          `UPDATE transactions SET status = 'failed', failure_reason = $2 WHERE external_reference = $1`,
+          [externalReference, `card_error: ${(err as Error).message}`.slice(0, 200)],
+        );
+        throw new BadRequestException('card_unavailable');
+      }
+      await this.db.query(
+        `UPDATE transactions SET status = $2, aggregator_txn_id = $3 WHERE external_reference = $1`,
+        [externalReference, result.accepted ? 'processing' : 'failed', result.transactionToken ?? null],
+      );
+      if (!result.accepted) throw new BadRequestException(result.message ?? 'card_setup_failed');
+      return {
+        reference: externalReference,
+        checkoutUrl: result.checkoutUrl,
+        status: 'processing',
+        amountCents,
+      };
+    }
+
+    const mno = dto.mno as Mno;
+    const aggregator = this.routeProvider(mno);
+    await this.db.query(
+      `INSERT INTO transactions
+         (ride_id, user_id, direction, method, provider, aggregator, amount_cents,
+          status, external_reference, payer_phone, purpose)
+       VALUES (NULL, $1, 'collection', 'mobile_money', $2, $3, $4, 'pending', $5, $6, 'commission')`,
+      [user.id, mno, aggregator, amountCents, externalReference, phone],
+    );
+    try {
+      const result = await this.provider(aggregator).initiateCollection({
+        externalReference,
+        amountCents,
+        payerPhone: phone,
+        mno,
+        rideReference: 'COMMISSION',
+        narration: `${country.brand} commission`,
+      });
+      await this.db.query(
+        `UPDATE transactions SET status = $2, aggregator_txn_id = $3, callback_payload = $4
+          WHERE external_reference = $1`,
+        [
+          externalReference,
+          result.accepted ? 'processing' : 'failed',
+          result.aggregatorTxnId ?? null,
+          JSON.stringify({ initiation: result.raw }),
+        ],
+      );
+      return {
+        reference: externalReference,
+        status: result.accepted ? 'processing' : 'failed',
+        amountCents,
+        message: result.accepted
+          ? msg('pay.check_phone', lang)
+          : result.message ?? msg('pay.not_started', lang),
+      };
+    } catch (err) {
+      // As with a fare: a timeout does not mean the prompt failed.
+      await this.db.query(
+        `UPDATE transactions SET status = 'processing', failure_reason = $2 WHERE external_reference = $1`,
+        [externalReference, `initiation_error: ${(err as Error).message}`],
+      );
+      return {
+        reference: externalReference,
+        status: 'processing',
+        amountCents,
+        message: msg('pay.confirming', lang),
+      };
+    }
+  }
+
+  /**
+   * Credits the wallet for a confirmed commission payment, inside the caller's
+   * transaction so the row's status change and the credit stand or fall
+   * together. Returns the driver id for the follow-up refresh.
+   */
+  private async creditCommission(
+    manager: { query: (sql: string, params?: any[]) => Promise<any> },
+    userId: string,
+    amountCents: number,
+  ): Promise<string | null> {
+    const rows = await manager.query(
+      `UPDATE drivers SET wallet_balance_cents = wallet_balance_cents + $2
+        WHERE user_id = $1 RETURNING id`,
+      [userId, amountCents],
+    );
+    return firstRow(rows)?.id ?? null;
+  }
+
+  /** Refreshes the cached debt position and tells the driver's app. */
+  private async afterCommissionPaid(driverId: string | null, userId: string, reference: string, amountCents: number) {
+    let position: any = null;
+    if (driverId) position = await this.cash.debtStatus(driverId);
+    this.gateway.server.to(`user:${userId}`).emit('payment:status', {
+      purpose: 'commission',
+      reference,
+      status: 'success',
+      amountCents,
+      debtCents: position?.debtCents,
+      isBlocked: position?.isBlocked,
+    });
+  }
+
+  // -------------------------------------------------------------------
   // Card
   // -------------------------------------------------------------------
 
@@ -224,7 +420,7 @@ export class PaymentsService {
    */
   async verifyCardPayment(userId: string, reference: string) {
     const [txn] = await this.db.query(
-      `SELECT id, ride_id, user_id, amount_cents, status, aggregator_txn_id
+      `SELECT id, ride_id, user_id, amount_cents, status, aggregator_txn_id, purpose
          FROM transactions WHERE external_reference = $1`,
       [reference],
     );
@@ -250,12 +446,14 @@ export class PaymentsService {
         return { status: 'failed', reason: 'amount_mismatch' };
       }
 
+      let cardCommission: { driverId: string | null } | null = null;
       await this.db.transaction(async (manager) => {
-        await manager.query(
+        const claimed = await manager.query(
           `UPDATE transactions
               SET status = 'success', settled_at = now(),
                   mno_receipt = $2, callback_payload = $3
-            WHERE id = $1`,
+            WHERE id = $1 AND status <> 'success'
+        RETURNING id`,
           [
             txn.id,
             verification.cardLastFour ? `****${verification.cardLastFour}` : null,
@@ -265,6 +463,14 @@ export class PaymentsService {
             }),
           ],
         );
+        // A second verification racing the first finds the row already paid.
+        if (!firstRow(claimed)) return;
+        if (txn.purpose === 'commission') {
+          cardCommission = {
+            driverId: await this.creditCommission(manager, txn.user_id, Number(txn.amount_cents)),
+          };
+          return;
+        }
         await manager.query(`UPDATE rides SET is_paid = TRUE WHERE id = $1`, [
           txn.ride_id,
         ]);
@@ -276,6 +482,11 @@ export class PaymentsService {
           [txn.ride_id],
         );
       });
+
+      if (cardCommission) {
+        await this.afterCommissionPaid(cardCommission.driverId, txn.user_id, reference, Number(txn.amount_cents));
+        return { status: 'success' };
+      }
 
       this.gateway.server.to(`ride:${txn.ride_id}`).emit('payment:status', {
         rideId: txn.ride_id,
@@ -400,10 +611,12 @@ export class PaymentsService {
       }
     }
 
+    let commissionPaid: { driverId: string | null; userId: string; amountCents: number } | null = null;
+    try {
     await this.db.transaction(async (manager) => {
       // Row lock so a concurrent reconciliation query cannot double-apply.
       const [txn] = await manager.query(
-        `SELECT id, ride_id, user_id, amount_cents, status
+        `SELECT id, ride_id, user_id, amount_cents, status, purpose
            FROM transactions WHERE external_reference = $1 FOR UPDATE`,
         [ref],
       );
@@ -437,7 +650,7 @@ export class PaymentsService {
         `UPDATE transactions
             SET status = $2::txn_status,
                 mno_receipt = $3,
-                settled_at = CASE WHEN $2::txn_status = 'success' THEN now() ELSE settled_at END,
+                settled_at = CASE WHEN $2::text = 'success' THEN now() ELSE settled_at END,
                 failure_reason = $4,
                 callback_payload = $5
           WHERE id = $1`,
@@ -450,7 +663,13 @@ export class PaymentsService {
         ],
       );
 
-      if (succeeded) {
+      if (succeeded && txn.purpose === 'commission') {
+        commissionPaid = {
+          driverId: await this.creditCommission(manager, txn.user_id, Number(txn.amount_cents)),
+          userId: txn.user_id,
+          amountCents: Number(txn.amount_cents),
+        };
+      } else if (succeeded) {
         await manager.query(
           `UPDATE rides SET is_paid = TRUE WHERE id = $1`,
           [txn.ride_id],
@@ -465,6 +684,18 @@ export class PaymentsService {
         );
       }
     });
+    } catch (err) {
+      // The callback was not applied. Release the duplicate guard so the
+      // aggregator's retry (or the sweep) can apply it, instead of being
+      // dropped as "already seen".
+      await this.redis.del(`webhook:seen:${ref}`);
+      throw err;
+    }
+
+    if (commissionPaid) {
+      await this.afterCommissionPaid(commissionPaid.driverId, commissionPaid.userId, ref, commissionPaid.amountCents);
+      return;
+    }
 
     // Push the outcome to both apps so neither has to poll.
     const [row] = await this.db.query(

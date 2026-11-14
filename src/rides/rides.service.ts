@@ -13,7 +13,7 @@
  *     mileage is a device that can be modified to report more.
  */
 
-import { Injectable, Inject, Logger, BadRequestException, forwardRef } from '@nestjs/common';
+import { Injectable, Inject, Logger, BadRequestException, ConflictException, forwardRef } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import Redis from 'ioredis';
 import * as crypto from 'node:crypto';
@@ -25,6 +25,8 @@ import { RealtimeGateway } from '../realtime/realtime.gateway';
 import { maskPhone, country } from '../common/country';
 import { NotificationsService } from '../notifications/notifications.service';
 import { MsgKey } from '../common/messages';
+import { PoolService, TripMatch } from '../pool/pool.service';
+import { POOL, discountBpsFor, isPoolCategory } from '../pool/pool.config';
 
 export interface BreadcrumbInput {
   driverId: string;
@@ -39,6 +41,9 @@ export interface BreadcrumbInput {
 }
 
 const OFFER_TTL_SECONDS = 15;
+
+/** Rides one rider may have open at once for other people. */
+const MAX_ACTIVE_FOR_OTHERS = 5;
 
 @Injectable()
 export class RidesService {
@@ -55,6 +60,7 @@ export class RidesService {
     @Inject(forwardRef(() => RealtimeGateway))
     private readonly gateway: RealtimeGateway,
     private readonly push: NotificationsService,
+    private readonly pool: PoolService,
   ) {}
 
   /** Push to the offered driver, for when the app is in the background. */
@@ -109,22 +115,54 @@ export class RidesService {
     // rather than silently re-priced at whatever surge is current.
     const cached = await this.redis.get(`quote:${body.quoteId}`);
     if (!cached) throw new BadRequestException('quote_expired');
-    const { fare } = JSON.parse(cached);
+    const { fare, poolPreview, input: quotedInput } = JSON.parse(cached);
+
+    // Pooling is an extra option on an ordinary ride request, never a
+    // replacement for it. It needs a vehicle that can seat strangers, and a
+    // quote that was priced for pooling.
+    const poolMode: string | null = body.poolMode ?? null;
+    if (poolMode) {
+      if (!POOL.enabled || !isPoolCategory(body.category) || !poolPreview) {
+        throw new BadRequestException('pool_unavailable');
+      }
+    }
+
+    // Rides booked for other people. The rider's own ride is limited to one
+    // per service by a database index; these are capped here instead.
+    const passengerName: string | null = body.passengerName?.trim() || null;
+    const passengerPhone: string | null = body.passengerPhone?.trim() || null;
+    if (passengerName) {
+      const [{ n }] = await this.db.query(
+        `SELECT count(*)::int AS n FROM rides
+          WHERE rider_id = $1 AND passenger_name IS NOT NULL
+            AND status IN ('requested','searching','accepted','arrived','in_progress')`,
+        [riderId],
+      );
+      if (n >= MAX_ACTIVE_FOR_OTHERS) {
+        throw new BadRequestException('too_many_active_rides');
+      }
+    }
 
     const reference = this.generateReference();
 
-    const [ride] = await this.db.query(
+    let ride: any;
+    try {
+      [ride] = await this.db.query(
       `INSERT INTO rides (
+          passenger_name, passenger_phone,
           reference, client_generated_id, rider_id, requested_category, status,
           pickup_point, pickup_address, dropoff_point, dropoff_address,
           pickup_zone_id, tariff_id, quoted_fare_cents, quoted_distance_m,
-          quoted_duration_s, surge_multiplier, payment_method)
+          quoted_duration_s, surge_multiplier, payment_method,
+          pool_mode, pool_trip_id, pool_preview_cents)
        VALUES (
+          $20, $21,
           $1, $2, $3, $4::vehicle_category, 'requested',
           ST_SetSRID(ST_MakePoint($5, $6), 4326)::geography, $7,
           ST_SetSRID(ST_MakePoint($8, $9), 4326)::geography, $10,
           zone_for_point(ST_SetSRID(ST_MakePoint($5, $6), 4326)::geography),
-          $11, $12, $13, $14, $15, $16::payment_method)
+          $11, $12, $13, $14, $15, $16::payment_method,
+          $17, $18::uuid, $19)
        RETURNING *`,
       [
         reference,
@@ -139,12 +177,28 @@ export class RidesService {
         body.dropoff.address ?? null,
         fare.tariffId,
         fare.totalFareCents,
-        body.distanceMetres ?? null,
-        body.durationSeconds ?? null,
+        // From the server's own route lookup stored with the quote, never from
+        // the client. Settlement falls back to this when the GPS trace is too
+        // sparse, so leaving it empty billed such a trip at distance zero.
+        Math.round(quotedInput?.distanceMetres ?? 0) || null,
+        Math.round(quotedInput?.durationSeconds ?? 0) || null,
         fare.surgeMultiplier,
         body.paymentMethod,
+        poolMode,
+        body.poolTripId ?? null,
+        poolMode && poolPreview ? poolPreview.sharedFareCents : null,
+        passengerName,
+        passengerPhone,
       ],
-    );
+      );
+    } catch (err: any) {
+      // The one-own-ride-per-service rule. A second ride is fine when it is
+      // booked for someone else; say so rather than returning a bare 500.
+      if (err?.code === '23505' && String(err?.constraint ?? err?.message).includes('rides_one_active_own_per_service')) {
+        throw new ConflictException('already_active_ride');
+      }
+      throw err;
+    }
 
     return ride;
   }
@@ -162,7 +216,10 @@ export class RidesService {
       `SELECT id, rider_id, requested_category,
               ST_Y(pickup_point::geometry) AS lat,
               ST_X(pickup_point::geometry) AS lng,
-              quoted_fare_cents, payment_method, status
+              quoted_fare_cents, payment_method, status,
+              pool_mode, pool_trip_id,
+              ST_Y(dropoff_point::geometry) AS dlat,
+              ST_X(dropoff_point::geometry) AS dlng
          FROM rides WHERE id = $1`,
       [rideId],
     );
@@ -192,12 +249,26 @@ export class RidesService {
       status: 'searching',
     });
 
+    // Car pooling. 'match' first looks for a vehicle already on the road that
+    // is going the same way; if none will take the rider, or the rider asked
+    // to start a shared trip, they become the host of a new trip that others
+    // can then join. Either way they carry on into ordinary dispatch below.
+    if (ride.pool_mode === 'match' && !ride.pool_trip_id) {
+      if (await this.tryLiveMatch(ride)) return;
+    }
+    if (ride.pool_mode && !ride.pool_trip_id) {
+      ride.pool_trip_id = await this.pool.openTrip(rideId, ride.requested_category);
+    }
+
     const declined: string[] = [];
 
     // Three passes. Between passes drivers move and new ones come online, so
     // a rider on a quiet street gets a second and third chance rather than an
     // immediate "no drivers".
     for (let pass = 0; pass < 3; pass++) {
+      // The rider may have cancelled while an earlier pass was running.
+      if (!(await this.stillSearching(rideId))) return;
+
       const candidates = await this.dispatch.findCandidates({
         rideId,
         riderId: ride.rider_id,
@@ -211,6 +282,7 @@ export class RidesService {
         continue;
       }
 
+      const offered: string[] = [];
       const winner = await this.dispatch.offerSequentially(
         {
           rideId,
@@ -222,11 +294,17 @@ export class RidesService {
         candidates,
         (driverId, offer, ttl) => this.sendOffer(rideId, ride, driverId, offer, ttl),
         (rid, driverId, ttl) => this.awaitResponse(rid, driverId, ttl),
+        offered,
       );
 
       if (winner) return;
-      declined.push(...candidates.map((c) => c.driverId));
+      // Only drivers who really saw the offer are ruled out for later passes.
+      // One that was busy with another offer at that instant gets another go.
+      declined.push(...offered);
+      if (offered.length === 0) await this.sleep(2500);
     }
+
+    if (!(await this.stillSearching(rideId))) return;
 
     // Exhausted. Expire rather than leaving the ride open forever, and tell
     // the rider plainly so they can re-request or switch category.
@@ -241,6 +319,7 @@ export class RidesService {
       status: 'expired',
       reasonCode: 'no_drivers_available',
     });
+    await this.onPoolRideEnded(rideId);
   }
 
   /**
@@ -254,16 +333,21 @@ export class RidesService {
     driverId: string,
     offer: ScoredDriver,
     ttlSeconds: number,
+    poolInfo?: { detourM: number; coRiders: number },
   ): Promise<void> {
     const token = this.signOfferToken(rideId, driverId);
     await this.redis.set(`offer:${rideId}:${driverId}`, token, 'EX', ttlSeconds + 5);
 
     const [detail] = await this.db.query(
       `SELECT r.pickup_address, r.dropoff_address, r.quoted_fare_cents,
+              ST_Y(r.pickup_point::geometry) AS plat, ST_X(r.pickup_point::geometry) AS plng,
+              ST_Y(r.dropoff_point::geometry) AS dlat, ST_X(r.dropoff_point::geometry) AS dlng,
               r.quoted_distance_m, r.surge_multiplier, r.payment_method,
               u.rating_avg AS rider_rating,
-              u.full_name AS rider_name,
+              COALESCE(r.passenger_name, u.full_name) AS rider_name,
               u.photo_key AS rider_photo_key,
+              (r.passenger_name IS NOT NULL) AS for_other,
+              r.pool_mode, r.pool_preview_cents,
               t.commission_bps_cap
          FROM rides r
          JOIN users u ON u.id = r.rider_id
@@ -272,7 +356,13 @@ export class RidesService {
       [rideId],
     );
 
-    const fare = Number(detail.quoted_fare_cents);
+    // A pooled rider is shown the shared fare, which is what the driver can
+    // expect when the car is shared; the full fare is only the ceiling.
+    const isPool = Boolean(detail.pool_mode);
+    const fare = isPool && detail.pool_preview_cents != null
+      ? Number(detail.pool_preview_cents)
+      : Number(detail.quoted_fare_cents);
+    const coRiders = poolInfo?.coRiders ?? (isPool ? await this.pool.coRiders(rideId) : 0);
     // Fallback only — the live tariff is the source of truth. Kept in step
     // with the operator's standard rate so a missing tariff cannot quietly
     // show a driver a higher take-home than they will actually receive.
@@ -284,8 +374,10 @@ export class RidesService {
       offerToken: token,
       expiresAt: new Date(Date.now() + ttlSeconds * 1000).toISOString(),
       ttlSeconds,
-      pickupAddress: detail.pickup_address ?? 'Point de départ',
-      dropoffAddress: detail.dropoff_address ?? 'Destination',
+      pickupAddress: detail.pickup_address ?? 'Pickup point',
+      dropoffAddress: detail.dropoff_address ?? 'Drop-off point',
+      pickup: { lat: Number(detail.plat), lng: Number(detail.plng) },
+      dropoff: { lat: Number(detail.dlat), lng: Number(detail.dlng) },
       distanceToPickupM: Math.round(offer.distanceM),
       etaToPickupSeconds: offer.etaSeconds,
       tripDistanceM: Number(detail.quoted_distance_m ?? 0),
@@ -296,10 +388,14 @@ export class RidesService {
       surgeMultiplier: Number(detail.surge_multiplier),
       riderRating: Number(detail.rider_rating),
       riderName: detail.rider_name,
-      riderPhotoUrl: detail.rider_photo_key
+      riderPhotoUrl: !detail.for_other && detail.rider_photo_key
         ? `/api/photos/${detail.rider_photo_key}`
         : null,
       paymentMethod: detail.payment_method,
+      isPool,
+      // Riders already aboard (or waiting) on the trip this one would join.
+      poolCoRiders: coRiders,
+      poolDetourM: poolInfo?.detourM ?? 0,
     });
   }
 
@@ -315,6 +411,7 @@ export class RidesService {
   ): Promise<'accepted' | 'declined' | 'timeout'> {
     const key = `offer:response:${rideId}:${driverId}`;
     const deadline = Date.now() + ttlSeconds * 1000;
+    let nextStatusCheck = Date.now() + 1000;
 
     while (Date.now() < deadline) {
       const response = await this.redis.get(key);
@@ -322,9 +419,265 @@ export class RidesService {
         await this.redis.del(key);
         return response;
       }
+      // A rider who cancels mid-offer closes it at once; the driver should
+      // not be left holding a request that no longer exists.
+      if (Date.now() >= nextStatusCheck) {
+        nextStatusCheck = Date.now() + 1000;
+        const state = await this.searchState(rideId);
+        if (state === 'claimed') return 'accepted'; // won a moment ago; the reply key is not set yet
+        if (state === 'closed') {
+          this.gateway.server
+            .to(`driver:${driverId}`)
+            .emit('ride:offer_closed', { rideId, reason: 'cancelled' });
+          return 'declined';
+        }
+      }
       await this.sleep(250);
     }
     return 'timeout';
+  }
+
+  /** Where a ride stands while it is being offered around. */
+  private async searchState(rideId: string): Promise<'open' | 'claimed' | 'closed'> {
+    const [r] = await this.db.query(
+      `SELECT status::text AS status, driver_id FROM rides WHERE id = $1`,
+      [rideId],
+    );
+    if (!r) return 'closed';
+    if (r.driver_id) return 'claimed';
+    return ['requested', 'searching'].includes(r.status) ? 'open' : 'closed';
+  }
+
+  /** True while the ride is still waiting for a driver. */
+  private async stillSearching(rideId: string): Promise<boolean> {
+    return (await this.searchState(rideId)) === 'open';
+  }
+
+  // ===================================================================
+  // Car pooling
+  // ===================================================================
+
+  /**
+   * Tries to put a new pool rider on a vehicle that is already on the road.
+   * Offers go to at most POOL.liveMatchOffers drivers, in best-fit order, so
+   * a rider is never kept waiting long before falling back to a trip of their
+   * own. Returns true when a driver accepted.
+   */
+  private async tryLiveMatch(ride: any): Promise<boolean> {
+    let matches: TripMatch[] = [];
+    try {
+      matches = await this.pool.findLiveMatches(
+        {
+          riderId: ride.rider_id,
+          category: ride.requested_category,
+          pickup: { lat: Number(ride.lat), lng: Number(ride.lng) },
+          dropoff: { lat: Number(ride.dlat), lng: Number(ride.dlng) },
+        },
+        POOL.liveMatchOffers,
+      );
+    } catch (err) {
+      // A matching fault must never stop the rider from getting a car.
+      this.logger.warn(`pool match failed ride=${ride.id}: ${(err as Error).message}`);
+      return false;
+    }
+
+    for (const m of matches) {
+      if (!(await this.stillSearching(ride.id))) return true;
+      if (await this.offerPoolSeat(ride, m)) return true;
+    }
+    return false;
+  }
+
+  /** One pool offer to the driver already running this trip. */
+  private async offerPoolSeat(ride: any, m: TripMatch): Promise<boolean> {
+    const driverId = m.trip.driverId!;
+    // Remembered so `claim` knows which trip the rider is joining.
+    await this.redis.set(`pool:offer:${ride.id}:${driverId}`, m.trip.id, 'EX', 60);
+
+    const candidate: ScoredDriver = {
+      driverId,
+      vehicleId: '',
+      distanceM: m.verdict.toPickupM,
+      etaSeconds: Math.round((m.verdict.toPickupM * 1.35) / 4),
+      score: 0,
+      acceptanceRate: 1,
+      rating: 5,
+    };
+    const offerOnce = () =>
+      this.dispatch.offerToDriver(
+        ride.id,
+        candidate,
+        (d, o, ttl) =>
+          this.sendOffer(ride.id, ride, d, o, ttl, {
+            detourM: m.verdict.detourM,
+            coRiders: m.trip.riders.length,
+          }),
+        (rid, d, ttl) => this.awaitResponse(rid, d, ttl),
+      );
+
+    // The driver may be mid-offer for a moment; a short wait beats dropping a
+    // good match.
+    let outcome = await offerOnce();
+    for (let i = 0; outcome === 'busy' && i < 3; i++) {
+      await this.sleep(1000);
+      outcome = await offerOnce();
+    }
+
+    await this.redis.del(`pool:offer:${ride.id}:${driverId}`);
+    return outcome === 'accepted';
+  }
+
+  /**
+   * A rider chose a specific shared trip from the list whose vehicle is
+   * already on the road. The driver is asked; if they decline or do not
+   * answer, the rider starts a shared trip of their own instead of being
+   * left without a car. (A trip still waiting for its first driver needs no
+   * offer: its riders are given the driver the host is given, see `claim`.)
+   */
+  async startPoolJoin(rideId: string, tripId: string): Promise<void> {
+    const [ride] = await this.db.query(
+      `SELECT id, rider_id, requested_category, status, pool_trip_id,
+              ST_Y(pickup_point::geometry) AS lat, ST_X(pickup_point::geometry) AS lng,
+              ST_Y(dropoff_point::geometry) AS dlat, ST_X(dropoff_point::geometry) AS dlng
+         FROM rides WHERE id = $1`,
+      [rideId],
+    );
+    if (!ride || ride.status !== 'requested') return;
+
+    // Any waiting-seat link is dropped: from here the rider is offered to the
+    // driver as a newcomer and is linked only when the driver accepts.
+    await this.db.query(
+      `UPDATE rides SET pool_trip_id = NULL WHERE id = $1 AND driver_id IS NULL`,
+      [rideId],
+    );
+    await this.joinRiderRoom(ride.rider_id, rideId);
+    this.gateway.server.to(`ride:${rideId}`).emit('ride:status_change', {
+      rideId, status: 'searching',
+    });
+
+    const match = await this.pool.checkJoin(tripId, {
+      riderId: ride.rider_id,
+      category: ride.requested_category,
+      pickup: { lat: Number(ride.lat), lng: Number(ride.lng) },
+      dropoff: { lat: Number(ride.dlat), lng: Number(ride.dlng) },
+    });
+
+    if (match && match.trip.driverId && (await this.offerPoolSeat(ride, match))) return;
+    if (!(await this.stillSearching(rideId))) return;
+
+    // Declined, timed out, or the trip filled / moved on. Carry on alone.
+    await this.db.query(
+      `UPDATE rides SET status = 'requested', pool_mode = 'host', pool_trip_id = NULL
+        WHERE id = $1 AND driver_id IS NULL AND status IN ('requested','searching')`,
+      [rideId],
+    );
+    void this.startDispatch(rideId).catch((err) =>
+      this.logger.error(`dispatch failed ride=${rideId}: ${err.message}`));
+  }
+
+  /** Subscribes a rider's live sockets to their ride's room. */
+  async joinRiderRoom(riderId: string, rideId: string): Promise<void> {
+    try {
+      await this.gateway.server.in(`user:${riderId}`).socketsJoin(`ride:${rideId}`);
+    } catch (err) {
+      this.logger.warn(`could not join rider to ride room ${rideId}: ${(err as Error).message}`);
+    }
+  }
+
+  /** Tells everyone on a trip how many others are now sharing it. */
+  async broadcastPoolCount(tripId: string): Promise<void> {
+    const ids = await this.pool.activeRideIds(tripId);
+    for (const id of ids) {
+      this.gateway.server.to(`ride:${id}`).emit('ride:pool_update', {
+        rideId: id,
+        coRiders: ids.length - 1,
+      });
+    }
+  }
+
+  /**
+   * What the driver's app needs to show one more rider on the trip.
+   * Names and areas only; the rider's number stays behind the contact sheet.
+   */
+  async poolRiderPayload(rideId: string) {
+    const [r] = await this.db.query(
+      `SELECT r.id, r.status::text AS status, r.payment_method, r.pickup_address,
+              r.dropoff_address, r.quoted_fare_cents, r.pool_preview_cents,
+              ST_Y(r.pickup_point::geometry) AS plat, ST_X(r.pickup_point::geometry) AS plng,
+              ST_Y(r.dropoff_point::geometry) AS dlat, ST_X(r.dropoff_point::geometry) AS dlng,
+              COALESCE(r.passenger_name, u.full_name) AS full_name,
+              (r.passenger_name IS NOT NULL) AS for_other,
+              u.photo_key, u.rating_avg
+         FROM rides r JOIN users u ON u.id = r.rider_id
+        WHERE r.id = $1`,
+      [rideId],
+    );
+    if (!r) return null;
+    return {
+      rideId: r.id,
+      status: r.status,
+      riderName: r.full_name,
+      riderRating: Number(r.rating_avg),
+      // A ride booked for someone else shows that person's name, not the
+      // booker's photo or rating.
+      riderPhotoUrl: !r.for_other && r.photo_key ? `/api/photos/${r.photo_key}` : null,
+      pickupAddress: r.pickup_address ?? '',
+      dropoffAddress: r.dropoff_address ?? '',
+      pickup: { lat: Number(r.plat), lng: Number(r.plng) },
+      dropoff: { lat: Number(r.dlat), lng: Number(r.dlng) },
+      fareCents: Number(r.pool_preview_cents ?? r.quoted_fare_cents ?? 0),
+      paymentMethod: r.payment_method,
+    };
+  }
+
+  /**
+   * Driver state follows the whole set of rides they are carrying, not the
+   * last thing that happened. With one rider this is identical to the old
+   * behaviour; with several, completing one rider must not mark the driver
+   * idle while another is still aboard.
+   */
+  private async refreshDriverState(driverId: string): Promise<void> {
+    const [row] = await this.db.query(
+      `UPDATE drivers d SET state = (
+         CASE
+           WHEN EXISTS (SELECT 1 FROM rides r WHERE r.driver_id = d.id AND r.status = 'in_progress')
+             THEN 'on_trip'
+           WHEN EXISTS (SELECT 1 FROM rides r WHERE r.driver_id = d.id AND r.status = 'arrived')
+             THEN 'at_pickup'
+           WHEN EXISTS (SELECT 1 FROM rides r WHERE r.driver_id = d.id AND r.status = 'accepted')
+             THEN 'en_route_pickup'
+           ELSE 'online_idle'
+         END)::driver_state
+       WHERE d.id = $1
+       RETURNING d.state::text AS state`,
+      [driverId],
+    );
+    // Dispatch reads the Redis snapshot, so it must never lag the database:
+    // a driver who has just taken a rider must stop being offered others.
+    if (row) await this.redis.hset(`driver:${driverId}`, 'state', row.state);
+  }
+
+  /**
+   * Housekeeping when a pool ride ends any way other than completing:
+   * hand the trip to the next waiting rider if the host left before a driver
+   * was found, and close the trip when nobody is left on it.
+   */
+  private async onPoolRideEnded(rideId: string): Promise<void> {
+    const [r] = await this.db.query(
+      `SELECT pool_trip_id, driver_id FROM rides WHERE id = $1`,
+      [rideId],
+    );
+    if (!r?.pool_trip_id) return;
+    if (r.driver_id) await this.redis.srem(`pool:driver:${r.driver_id}:rides`, rideId);
+
+    const next = await this.pool.promoteHost(r.pool_trip_id, rideId);
+    if (next) {
+      this.logger.log(`pool trip ${r.pool_trip_id}: ride ${next} is now the host`);
+      void this.startDispatch(next).catch((err) =>
+        this.logger.error(`dispatch failed ride=${next}: ${err.message}`));
+    }
+    await this.pool.closeIfDone(r.pool_trip_id);
+    await this.broadcastPoolCount(r.pool_trip_id);
   }
 
   // ===================================================================
@@ -343,28 +696,63 @@ export class RidesService {
       return null;
     }
 
+    // A pool rider joining a vehicle already on the road was offered to this
+    // driver for a specific trip; the link is made here, in the same
+    // statement that assigns the driver.
+    const joinTripId = await this.redis.get(`pool:offer:${rideId}:${driverId}`);
+
     const [claimed] = await this.db.query(
       `UPDATE rides r
           SET driver_id = $2,
               vehicle_id = d.active_vehicle_id,
               status = 'accepted',
-              accepted_at = now()
+              accepted_at = now(),
+              pool_trip_id = COALESCE(r.pool_trip_id, $3::uuid)
          FROM drivers d
         WHERE r.id = $1
           AND d.id = $2
           AND r.driver_id IS NULL
           AND r.status IN ('requested', 'searching')
-        RETURNING r.id`,
-      [rideId, driverId],
+        RETURNING r.id, r.pool_trip_id, r.pool_mode`,
+      [rideId, driverId, joinTripId],
     );
 
     if (!claimed) return null;
 
     await this.redis.set(`offer:response:${rideId}:${driverId}`, 'accepted', 'EX', 30);
-    await this.db.query(
-      `UPDATE drivers SET state = 'en_route_pickup' WHERE id = $1`,
-      [driverId],
-    );
+
+    // Pooling: the first rider's driver becomes the trip's driver, and anyone
+    // who joined the trip while it was still waiting gets that driver too.
+    let pooledRideIds: string[] = [];
+    let joinedExisting = false;
+    if (claimed.pool_trip_id) {
+      const [tripDriver] = await this.db.query(
+        `UPDATE pool_trips SET driver_id = $2
+          WHERE id = $1 AND driver_id IS NULL RETURNING id`,
+        [claimed.pool_trip_id, driverId],
+      );
+      if (tripDriver) {
+        const attached = await this.db.query(
+          `UPDATE rides r
+              SET driver_id = $2, vehicle_id = d.active_vehicle_id,
+                  status = 'accepted', accepted_at = now()
+             FROM drivers d
+            WHERE r.pool_trip_id = $1 AND r.id <> $3 AND d.id = $2
+              AND r.driver_id IS NULL AND r.status = 'requested'
+            RETURNING r.id`,
+          [claimed.pool_trip_id, driverId, rideId],
+        );
+        pooledRideIds = attached.map((a: any) => a.id);
+      } else {
+        joinedExisting = true;
+      }
+      const key = `pool:driver:${driverId}:rides`;
+      await this.redis.sadd(key, rideId, ...pooledRideIds);
+      await this.redis.expire(key, 6 * 3600);
+      await this.redis.del(`pool:offer:${rideId}:${driverId}`);
+    }
+
+    await this.refreshDriverState(driverId);
     // Out of the idle pool until the trip ends.
     const [driver] = await this.db.query(
       `SELECT v.category FROM drivers d JOIN vehicles v ON v.id = d.active_vehicle_id
@@ -406,6 +794,15 @@ export class RidesService {
         category: profile.category,
       },
       etaSeconds: 0,
+      pool: claimed.pool_trip_id
+        ? {
+            tripId: claimed.pool_trip_id as string,
+            // Riders attached to this driver by the same acceptance.
+            attachedRideIds: pooledRideIds,
+            // True when this rider joined a vehicle that already had riders.
+            joinedExisting,
+          }
+        : null,
     };
   }
 
@@ -450,10 +847,7 @@ export class RidesService {
       );
       if (!row) throw new BadRequestException('invalid_transition');
 
-      await this.db.query(
-        `UPDATE drivers SET state = $2::driver_state WHERE id = $1`,
-        [driverId, status === 'arrived' ? 'at_pickup' : 'on_trip'],
-      );
+      await this.refreshDriverState(driverId);
       return this.rowToRide(row);
     }
 
@@ -477,14 +871,30 @@ export class RidesService {
     // ST_Length over the ordered breadcrumb line gives the driven distance.
     // Falling back to the quote when the trace is too sparse is deliberate:
     // a GPS outage should not produce a near-zero fare for a 12 km trip.
-    const [measured] = await this.db.query(
-      `SELECT
-         COALESCE(ST_Length(ST_MakeLine(position::geometry ORDER BY recorded_at)::geography), 0) AS distance_m,
-         COUNT(*) AS points
-       FROM locations
-      WHERE ride_id = $1`,
-      [rideId],
-    );
+    // Pings still waiting in this node's buffer belong to this trip.
+    await this.flushBreadcrumbs();
+
+    // A pooled rider's distance is what the vehicle covered while they were
+    // aboard. Breadcrumbs are tagged with a single ride id, so for a shared
+    // vehicle the trace is read by driver and time window instead.
+    const isPool = Boolean(ride.pool_trip_id);
+    const [measured] = isPool
+      ? await this.db.query(
+          `SELECT
+             COALESCE(ST_Length(ST_MakeLine(position::geometry ORDER BY recorded_at)::geography), 0) AS distance_m,
+             COUNT(*) AS points
+           FROM locations
+          WHERE driver_id = $1 AND recorded_at >= $2 AND recorded_at <= $3`,
+          [driverId, ride.started_at, at],
+        )
+      : await this.db.query(
+          `SELECT
+             COALESCE(ST_Length(ST_MakeLine(position::geometry ORDER BY recorded_at)::geography), 0) AS distance_m,
+             COUNT(*) AS points
+           FROM locations
+          WHERE ride_id = $1`,
+          [rideId],
+        );
 
     const tracedDistance = Number(measured?.distance_m ?? 0);
     const enoughPoints = Number(measured?.points ?? 0) >= 5;
@@ -497,6 +907,24 @@ export class RidesService {
       Math.round((at.getTime() - new Date(ride.started_at).getTime()) / 1000),
     );
 
+    // The pool discount is earned, not promised: it applies only for the
+    // riders who were really on board together. Other riders count if their
+    // time aboard overlapped this one's at any point.
+    let sharedWith = 0;
+    if (isPool) {
+      const [overlap] = await this.db.query(
+        `SELECT COUNT(*)::int AS n FROM rides o
+          WHERE o.pool_trip_id = $1 AND o.id <> $2
+            AND o.started_at IS NOT NULL
+            AND o.status IN ('in_progress', 'completed')
+            AND o.started_at < $3
+            AND COALESCE(o.completed_at, $3) > $4`,
+        [ride.pool_trip_id, rideId, at, ride.started_at],
+      );
+      sharedWith = Number(overlap?.n ?? 0);
+    }
+    const poolDiscountBps = discountBpsFor(sharedWith);
+
     const { fare, needsReview } = await this.fares.settle(
       {
         category: ride.requested_category,
@@ -505,6 +933,7 @@ export class RidesService {
         waitingSeconds: ride.waiting_seconds ?? 0,
         pickup: { lat: Number(ride.pickup_lat), lng: Number(ride.pickup_lng) },
         lockedSurge: Number(ride.surge_multiplier),
+        poolDiscountBps,
       },
       Number(ride.quoted_fare_cents),
     );
@@ -519,7 +948,10 @@ export class RidesService {
               commission_cents = $6,
               booking_fee_cents = $7,
               vat_cents = $8,
-              driver_earnings_cents = $9
+              driver_earnings_cents = $9,
+              pool_discount_bps = $10,
+              pool_discount_cents = $11,
+              pool_shared_with = $12
         WHERE id = $1
         RETURNING *`,
       [
@@ -532,6 +964,9 @@ export class RidesService {
         fare.bookingFeeCents,
         fare.vatOnCommissionCents,
         fare.driverEarningsCents,
+        poolDiscountBps,
+        fare.poolDiscountCents,
+        sharedWith,
       ],
     );
 
@@ -542,18 +977,22 @@ export class RidesService {
       await this.db.query(
         `UPDATE drivers
             SET wallet_balance_cents = wallet_balance_cents - $2,
-                completed_trips = completed_trips + 1,
-                state = 'online_idle'
+                completed_trips = completed_trips + 1
           WHERE id = $1`,
         [driverId, fare.commissionCents],
       );
     } else {
       await this.db.query(
-        `UPDATE drivers
-            SET completed_trips = completed_trips + 1, state = 'online_idle'
-          WHERE id = $1`,
+        `UPDATE drivers SET completed_trips = completed_trips + 1 WHERE id = $1`,
         [driverId],
       );
+    }
+    await this.refreshDriverState(driverId);
+
+    if (isPool) {
+      await this.redis.srem(`pool:driver:${driverId}:rides`, rideId);
+      await this.pool.closeIfDone(ride.pool_trip_id);
+      await this.broadcastPoolCount(ride.pool_trip_id);
     }
 
     if (needsReview) {
@@ -599,18 +1038,14 @@ export class RidesService {
       ],
     );
 
-    if (ride.driver_id) {
-      await this.db.query(
-        `UPDATE drivers SET state = 'online_idle' WHERE id = $1`,
-        [ride.driver_id],
-      );
-    }
+    if (ride.driver_id) await this.refreshDriverState(ride.driver_id);
 
     this.gateway.server.to(`ride:${rideId}`).emit('ride:status_change', {
       rideId,
       status: byRider ? 'cancelled_by_rider' : 'cancelled_by_driver',
       cancellationFeeCents: feeCents,
     });
+    await this.onPoolRideEnded(rideId);
 
     return { cancelled: true, feeCents };
   }
@@ -716,11 +1151,16 @@ export class RidesService {
     const batch = this.breadcrumbBuffer;
     this.breadcrumbBuffer = [];
 
+    // Every placeholder is typed. Without the casts Postgres sees untyped
+    // text in a VALUES list and refuses to put it in uuid / smallint columns,
+    // which made every flush fail and left the locations table empty.
     const values = batch
       .map(
         (_, i) =>
-          `($${i * 8 + 1}, $${i * 8 + 2}, ST_SetSRID(ST_MakePoint($${i * 8 + 3}, $${i * 8 + 4}), 4326)::geography, ` +
-          `$${i * 8 + 5}, $${i * 8 + 6}, $${i * 8 + 7}, $${i * 8 + 8}, now(), $${i * 8 + 8})`,
+          `($${i * 9 + 1}::uuid, $${i * 9 + 2}::uuid, ` +
+          `ST_SetSRID(ST_MakePoint($${i * 9 + 3}::float8, $${i * 9 + 4}::float8), 4326)::geography, ` +
+          `ROUND($${i * 9 + 5}::numeric)::smallint, ROUND($${i * 9 + 6}::numeric)::smallint, ` +
+          `ROUND($${i * 9 + 7}::numeric)::smallint, $${i * 9 + 8}::timestamptz, $${i * 9 + 9}::boolean)`,
       )
       .join(', ');
 
@@ -733,14 +1173,14 @@ export class RidesService {
       b.speedKph,
       b.accuracyM,
       b.recordedAt,
+      b.isBackfilled,
     ]);
 
     try {
       await this.db.query(
         `INSERT INTO locations
-           (driver_id, ride_id, position, heading_deg, speed_kph, accuracy_m, recorded_at, received_at, is_backfilled)
-         SELECT driver_id, ride_id, position, heading_deg, speed_kph, accuracy_m, recorded_at, received_at, FALSE
-           FROM (VALUES ${values}) AS v(driver_id, ride_id, position, heading_deg, speed_kph, accuracy_m, recorded_at, received_at, dup)`,
+           (driver_id, ride_id, position, heading_deg, speed_kph, accuracy_m, recorded_at, is_backfilled)
+         VALUES ${values}`,
         params,
       );
     } catch (err) {
@@ -753,6 +1193,119 @@ export class RidesService {
   // ===================================================================
   // Reads
   // ===================================================================
+
+  /**
+   * Rides a driver is carrying right now, shaped for the driver app. Lets the
+   * app pick the trip back up after a restart or a dropped connection instead
+   * of showing an empty screen with a rider waiting.
+   */
+  async findActiveForDriverUser(userId: string) {
+    const rows = await this.db.query(
+      `SELECT r.id FROM rides r JOIN drivers d ON d.id = r.driver_id
+        WHERE d.user_id = $1 AND r.status IN ('accepted','arrived','in_progress')
+        ORDER BY r.requested_at ASC`,
+      [userId],
+    );
+    const out = [];
+    for (const r of rows) {
+      const p = await this.poolRiderPayload(r.id);
+      if (p) out.push(p);
+    }
+    return out;
+  }
+
+
+  /**
+   * Everything the rider's screen needs about every ride they have open: the
+   * driver's name, photo and rating, the vehicle (make, model, colour, plate),
+   * where the driver is right now, and who the ride is for. The rider app and
+   * the web page both poll this as a safety net behind the live socket, so a
+   * missed event never leaves a rider staring at "searching" after a driver
+   * has accepted.
+   */
+  async trackingForRider(userId: string) {
+    const rows = await this.db.query(
+      `SELECT r.id, r.reference, r.status::text AS status,
+              r.requested_category::text AS category, r.service_type::text AS service_type,
+              r.quoted_fare_cents, r.final_fare_cents, r.payment_method::text AS payment_method,
+              r.is_paid, r.pickup_address, r.dropoff_address,
+              r.passenger_name, r.passenger_phone, r.pool_mode, r.driver_id,
+              ST_Y(r.pickup_point::geometry) AS plat, ST_X(r.pickup_point::geometry) AS plng,
+              ST_Y(r.dropoff_point::geometry) AS dlat, ST_X(r.dropoff_point::geometry) AS dlng,
+              r.accepted_at, r.arrived_at, r.started_at, r.requested_at,
+              u.full_name AS driver_name, u.photo_key AS driver_photo, u.rating_avg AS driver_rating,
+              d.completed_trips,
+              v.plate_number, v.make, v.model, v.colour, v.category::text AS vehicle_category
+         FROM rides r
+         LEFT JOIN drivers d ON d.id = r.driver_id
+         LEFT JOIN users u ON u.id = d.user_id
+         LEFT JOIN vehicles v ON v.id = d.active_vehicle_id
+        WHERE r.rider_id = $1
+          AND ( r.status IN ('requested','searching','accepted','arrived','in_progress')
+                OR (r.status = 'completed' AND r.completed_at > now() - interval '30 minutes') )
+        ORDER BY r.requested_at ASC`,
+      [userId],
+    );
+
+    const out = [];
+    for (const r of rows) {
+      let driverPosition: any = null;
+      if (r.driver_id && ['accepted', 'arrived', 'in_progress'].includes(r.status)) {
+        const h = await this.redis.hmget(`driver:${r.driver_id}`, 'lat', 'lng', 'heading', 'lastPingAt');
+        if (h[0] && h[1]) {
+          driverPosition = { lat: Number(h[0]), lng: Number(h[1]), heading: Number(h[2] ?? 0), at: Number(h[3] ?? 0) };
+        }
+      }
+      out.push({
+        rideId: r.id,
+        reference: r.reference,
+        status: r.status,
+        category: r.category,
+        serviceType: r.service_type,
+        quotedFareCents: Number(r.quoted_fare_cents ?? 0),
+        finalFareCents: r.final_fare_cents == null ? null : Number(r.final_fare_cents),
+        paymentMethod: r.payment_method,
+        isPaid: Boolean(r.is_paid),
+        pickupAddress: r.pickup_address ?? '',
+        dropoffAddress: r.dropoff_address ?? '',
+        pickup: { lat: Number(r.plat), lng: Number(r.plng) },
+        dropoff: { lat: Number(r.dlat), lng: Number(r.dlng) },
+        passengerName: r.passenger_name ?? null,
+        forOther: Boolean(r.passenger_name),
+        poolMode: r.pool_mode ?? null,
+        driver: r.driver_id
+          ? {
+              name: r.driver_name,
+              photoUrl: r.driver_photo ? `/api/photos/${r.driver_photo}` : null,
+              rating: Number(r.driver_rating ?? 5),
+              trips: Number(r.completed_trips ?? 0),
+              phoneMasked: '',
+            }
+          : null,
+        vehicle: r.driver_id
+          ? {
+              plate: r.plate_number,
+              make: r.make,
+              model: r.model,
+              colour: r.colour,
+              category: r.vehicle_category,
+            }
+          : null,
+        driverPosition,
+        arrivedAt: r.arrived_at,
+      });
+    }
+    return out;
+  }
+
+  async openRideIdsForDriver(driverId: string): Promise<string[]> {
+    const rows = await this.db.query(
+      `SELECT id FROM rides WHERE driver_id = $1
+          AND status IN ('accepted','arrived','in_progress')`,
+      [driverId],
+    );
+    return rows.map((r: any) => r.id);
+  }
 
   async findActiveForUser(userId: string) {
     const rows = await this.db.query(
@@ -790,6 +1343,15 @@ export class RidesService {
       finalFareCents: ride.finalFareCents ?? ride.final_fare_cents ?? null,
       paymentMethod: ride.paymentMethod ?? ride.payment_method,
       isPaid: ride.isPaid ?? ride.is_paid ?? false,
+      pool: (ride.pool_mode ?? ride.poolMode)
+        ? {
+            mode: ride.pool_mode ?? ride.poolMode,
+            previewCents: ride.pool_preview_cents != null ? Number(ride.pool_preview_cents) : null,
+            discountBps: Number(ride.pool_discount_bps ?? 0),
+            discountCents: Number(ride.pool_discount_cents ?? 0),
+            sharedWith: Number(ride.pool_shared_with ?? 0),
+          }
+        : null,
       at: Date.now(),
     };
   }

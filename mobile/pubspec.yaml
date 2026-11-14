@@ -46,6 +46,17 @@ dependencies:
   # project values are supplied.
   firebase_core: ^3.8.0
   firebase_messaging: ^15.1.6
+  # In-app audio calls between rider and driver (WebRTC), and the runtime
+  # permission prompts the driver app needs to keep working in the background
+  # (all-the-time location, notifications, battery-optimisation exemption,
+  # microphone).
+  flutter_webrtc: ^0.12.5
+  permission_handler: ^11.3.1
+
+  # Alerts that reach the lock screen: driver found, driver arrived (rider),
+  # arrived at pickup (driver). Needs core-library desugaring, which CI turns
+  # on in the Gradle init script.
+  flutter_local_notifications: ^17.2.4
 
   # Card payments open the provider's hosted 3-D Secure page via url_launcher
   # in an external browser rather than an in-app WebView. Card fields are
