@@ -144,6 +144,35 @@ SELECT code, name_en FROM service_zones;
    domain. Until then they default open, which is fine for mobile clients but
    not something to leave in place.
 
+## Emergency alerts on WhatsApp
+
+When someone presses SOS, the server messages their emergency contact on
+WhatsApp and by SMS automatically, with a Google Maps link to their location
+and the trip details (trip reference, pickup and drop-off, driver or
+passenger name and phone, vehicle and plate).
+
+WhatsApp only delivers a business's first message to a person through an
+approved template, so register one in WhatsApp Manager:
+
+- Name: `kwema_emergency_alert`, category **Utility**, language English
+- Body:
+
+  ```
+  EMERGENCY ALERT: {{1}} has pressed the emergency button in the Kwema Ride app. Location: {{2}} Trip: {{3}} Please call them now. If you cannot reach them, call {{4}}.
+  ```
+
+Then set on `kwema-ride-kenya-api`:
+
+```
+WHATSAPP_API_URL=https://graph.facebook.com/v21.0/<PHONE_NUMBER_ID>/messages
+WHATSAPP_TOKEN=<permanent access token>
+WHATSAPP_TEMPLATE_NAME=kwema_emergency_alert
+WHATSAPP_TEMPLATE_LANG=en
+```
+
+Without a template name the server sends plain text, which WhatsApp delivers
+only to contacts who have messaged the business in the last 24 hours.
+
 ## Scaling
 
 Keep `numReplicas: 1` until you have real load. The architecture is
