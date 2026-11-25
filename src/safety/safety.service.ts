@@ -25,6 +25,24 @@ import Redis from 'ioredis';
 import { REDIS } from '../common/redis.module';
 import { country } from '../common/country';
 
+export interface SosContext {
+  name: string | null;
+  phone: string | null;
+  emergencyContactName: string | null;
+  emergencyContactPhone: string | null;
+  ride: {
+    reference: string | null;
+    status: string | null;
+    pickup: string | null;
+    dropoff: string | null;
+    riderName: string | null;
+    riderPhone: string | null;
+    driverName: string | null;
+    driverPhone: string | null;
+    vehicle: string | null;
+  } | null;
+}
+
 export interface SosInput {
   userId: string;
   role: 'rider' | 'driver';
@@ -71,6 +89,13 @@ export class SafetyService {
       Number.isFinite(input.lat) && Number.isFinite(input.lng);
 
     let alertId: string | null = null;
+
+    // SOS pressed from the home screen carries no ride id. If the person is
+    // on a trip right now, attach it anyway: the trip is the most useful
+    // thing the emergency contact and ops can be told.
+    if (!input.rideId) {
+      input.rideId = await this.activeRideId(input.userId);
+    }
 
     try {
       const [row] = await this.db.query(
@@ -127,7 +152,7 @@ export class SafetyService {
         .catch(() => undefined);
     }
 
-    void this.notifyEmergencyContact(input.userId, alertId, input.lat, input.lng);
+    void this.notifyEmergencyContact(alertId, input.role, context, input.lat, input.lng);
 
     return {
       raised: true,
@@ -141,8 +166,32 @@ export class SafetyService {
     };
   }
 
+  /**
+   * The trip the person is on right now, as rider or as driver, if any.
+   * Never throws: a failed lookup only means the alert goes without trip
+   * details.
+   */
+  private async activeRideId(userId: string): Promise<string | null> {
+    try {
+      const [r] = await this.db.query(
+        `SELECT r.id
+           FROM rides r
+           LEFT JOIN drivers d ON d.id = r.driver_id
+          WHERE (r.rider_id = $1 OR d.user_id = $1)
+            AND r.status IN ('requested', 'searching', 'accepted', 'arrived', 'in_progress')
+          ORDER BY r.requested_at DESC
+          LIMIT 1`,
+        [userId],
+      );
+      return r?.id ?? null;
+    } catch (err) {
+      this.logger.error(`SOS active-ride lookup failed: ${(err as Error).message}`);
+      return null;
+    }
+  }
+
   /** Who and what, so ops do not have to look anything up. */
-  private async context(userId: string, rideId: string | null) {
+  private async context(userId: string, rideId: string | null): Promise<SosContext> {
     try {
       const [user] = await this.db.query(
         `SELECT full_name, phone, emergency_contact_name, emergency_contact_phone
@@ -195,72 +244,143 @@ export class SafetyService {
   }
 
   /**
-   * Texts the person's own emergency contact.
-   *
-   * Fire-and-forget: an SMS gateway that is slow or down must not delay the
-   * confirmation shown to someone in trouble.
+   * The facts an emergency contact needs, in one place, so WhatsApp, SMS,
+   * the wa.me link and the admin panel all say the same thing.
    */
-  /**
-   * Builds the message sent to an emergency contact.
-   *
-   * A Google Maps link rather than raw coordinates: the contact is a family
-   * member on a phone, not an operator with a mapping tool, and a tappable
-   * link is the difference between knowing roughly where and being able to
-   * go there.
-   */
-  private emergencyText(
-    name: string,
+  private emergencyFacts(
+    name: string | null,
+    role: 'rider' | 'driver' | null,
+    phone: string | null,
     lat?: number | null,
     lng?: number | null,
-  ): string {
-    const where =
+    ride?: SosContext['ride'] | null,
+  ) {
+    const who = (name ?? '').trim() || 'Your contact';
+    const location =
       lat != null && lng != null
         ? `https://maps.google.com/?q=${lat},${lng}`
-        : 'location unavailable';
+        : 'Location unavailable';
+    const time = new Date().toLocaleString('en-GB', {
+      timeZone: country.timezone,
+      day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
+    });
+
+    // Ride details as short labelled parts. The template version joins them
+    // on one line, because WhatsApp template parameters may not contain
+    // line breaks.
+    const rideParts: string[] = [];
+    if (ride) {
+      if (ride.reference) rideParts.push(`Trip ${ride.reference} (${String(ride.status ?? '').replace('_', ' ')})`);
+      if (ride.pickup) rideParts.push(`From: ${ride.pickup}`);
+      if (ride.dropoff) rideParts.push(`To: ${ride.dropoff}`);
+      if (role !== 'driver' && ride.driverName) {
+        rideParts.push(`Driver: ${ride.driverName}${ride.driverPhone ? ` ${ride.driverPhone}` : ''}`);
+      }
+      if (ride.vehicle) rideParts.push(`Vehicle: ${ride.vehicle}`);
+      if (role === 'driver' && ride.riderName) {
+        rideParts.push(`Passenger: ${ride.riderName}${ride.riderPhone ? ` ${ride.riderPhone}` : ''}`);
+      }
+    }
+
+    return {
+      who,
+      phone,
+      location,
+      time,
+      rideParts,
+      emergencyLine: `${EMERGENCY_NUMBERS.label}: ${EMERGENCY_NUMBERS.primary}` +
+        (EMERGENCY_NUMBERS.ambulance ? `, ambulance ${EMERGENCY_NUMBERS.ambulance}` : ''),
+    };
+  }
+
+  /**
+   * The full message, for SMS, plain WhatsApp text and wa.me links.
+   *
+   * A Google Maps link rather than raw coordinates: the contact is a family
+   * member on a phone, not an operator with a mapping tool.
+   */
+  private emergencyText(
+    name: string | null,
+    lat?: number | null,
+    lng?: number | null,
+    ride?: SosContext['ride'] | null,
+    role: 'rider' | 'driver' | null = null,
+    phone: string | null = null,
+  ): string {
+    const f = this.emergencyFacts(name, role, phone, lat, lng, ride);
     return (
-      `${country.brand.toUpperCase()} EMERGENCY\n\n${name || 'Your contact'} has raised an ` +
-      `emergency alert.\n\nLocation: ${where}\n\n` +
-      `${EMERGENCY_NUMBERS.label}: ${EMERGENCY_NUMBERS.primary}`
+      `${country.brand.toUpperCase()} EMERGENCY\n\n` +
+      `${f.who}${f.phone ? ` (${f.phone})` : ''} raised an emergency alert at ${f.time}.\n\n` +
+      `Location: ${f.location}\n` +
+      (f.rideParts.length ? `\n${f.rideParts.join('\n')}\n` : '') +
+      `\nCall them now. If you cannot reach them, call ${f.emergencyLine}.`
     );
   }
 
   /**
-   * Sends the alert to the contact over WhatsApp.
+   * Sends the alert to the contact over WhatsApp (Meta Cloud API format).
    *
-   * WhatsApp is the messaging default in East Africa, and unlike SMS it carries
-   * a tappable map link reliably and shows delivery. It needs a WhatsApp
-   * Business API provider — Meta Cloud API, or a reseller — configured
-   * through WHATSAPP_API_URL and WHATSAPP_TOKEN.
+   * WhatsApp only delivers a business-initiated message to someone who has
+   * not written to the business in the last 24 hours if it is an approved
+   * template. An emergency contact has almost never written to us, so the
+   * template is the path that actually arrives. Free text is tried only
+   * when no template is configured, or the template send fails, and is
+   * delivered only if that contact happens to be inside the 24-hour window.
    *
-   * SMS remains the fallback and is always attempted, because WhatsApp
-   * requires the recipient to have it installed and to have data. In an
-   * emergency, sending both is worth the duplicate cost.
+   * Template (category UTILITY), registered in WhatsApp Manager under the
+   * name in WHATSAPP_TEMPLATE_NAME, body with four parameters:
+   *
+   *   EMERGENCY ALERT: {{1}} has pressed the emergency button in the
+   *   Kwema Ride app. Location: {{2}} Trip: {{3}} Please call them now.
+   *   If you cannot reach them, call {{4}}.
    */
-  private async sendWhatsApp(to: string, text: string): Promise<boolean> {
+  private async sendWhatsApp(
+    to: string,
+    text: string,
+    params: [string, string, string, string],
+  ): Promise<boolean> {
     const url = process.env.WHATSAPP_API_URL;
     const token = process.env.WHATSAPP_TOKEN;
     if (!url || !token) return false;
 
-    try {
+    const recipient = to.replace('+', '');
+    const post = async (body: Record<string, unknown>) => {
       const res = await fetch(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({
-          messaging_product: 'whatsapp',
-          // WhatsApp expects the number without a leading plus.
-          to: to.replace('+', ''),
-          type: 'text',
-          text: { preview_url: true, body: text },
-        }),
+        body: JSON.stringify({ messaging_product: 'whatsapp', to: recipient, ...body }),
       });
       if (!res.ok) {
-        this.logger.error(`whatsapp send failed: ${res.status}`);
-        return false;
+        const detail = await res.text().catch(() => '');
+        this.logger.error(`whatsapp send failed: ${res.status} ${detail.slice(0, 300)}`);
       }
-      return true;
+      return res.ok;
+    };
+
+    const template = process.env.WHATSAPP_TEMPLATE_NAME;
+    try {
+      if (template) {
+        // Template parameters: no line breaks, tabs or runs of spaces, and
+        // never empty.
+        const clean = (v: string) =>
+          (v || '-').replace(/[\r\n\t]+/g, ' ').replace(/ {2,}/g, ' ').trim().slice(0, 900);
+        const sent = await post({
+          type: 'template',
+          template: {
+            name: template,
+            language: { code: process.env.WHATSAPP_TEMPLATE_LANG || 'en' },
+            components: [{
+              type: 'body',
+              parameters: params.map((p) => ({ type: 'text', text: clean(p) })),
+            }],
+          },
+        });
+        if (sent) return true;
+      }
+      return await post({ type: 'text', text: { preview_url: true, body: text } });
     } catch (err) {
       this.logger.error(`whatsapp send error: ${(err as Error).message}`);
       return false;
@@ -279,27 +399,37 @@ export class SafetyService {
     return `https://wa.me/${to.replace('+', '')}?text=${encodeURIComponent(text)}`;
   }
 
+  /**
+   * Messages the person's own emergency contact, automatically, the moment
+   * the alert is on record.
+   *
+   * Fire-and-forget: a slow or failing gateway must not delay the
+   * confirmation shown to someone in trouble.
+   */
   private async notifyEmergencyContact(
-    userId: string,
     alertId: string | null,
+    role: 'rider' | 'driver',
+    context: SosContext,
     lat?: number | null,
     lng?: number | null,
   ): Promise<void> {
     try {
-      const [user] = await this.db.query(
-        `SELECT full_name, emergency_contact_phone FROM users WHERE id = $1`,
-        [userId],
-      );
-      const to = user?.emergency_contact_phone;
+      const to = context.emergencyContactPhone;
       if (!to) return;
 
-      const text = this.emergencyText(user.full_name, lat, lng);
+      const text = this.emergencyText(context.name, lat, lng, context.ride, role, context.phone);
+      const f = this.emergencyFacts(context.name, role, context.phone, lat, lng, context.ride);
 
       // Both channels, deliberately. WhatsApp carries the map link properly
       // and is what people actually read here; SMS reaches a handset with no
       // data or no WhatsApp installed. In an emergency the duplicate cost is
       // not worth optimising away.
-      const viaWhatsApp = await this.sendWhatsApp(to, text);
+      const viaWhatsApp = await this.sendWhatsApp(to, text, [
+        `${f.who}${f.phone ? ` (${f.phone})` : ''} at ${f.time}`,
+        f.location,
+        f.rideParts.length ? f.rideParts.join('; ') : 'Not on a trip',
+        f.emergencyLine,
+      ]);
       if (viaWhatsApp) this.logger.log(`emergency contact reached on WhatsApp`);
 
       if (!process.env.SMS_API_URL) {
@@ -393,7 +523,18 @@ export class SafetyService {
       contactWhatsapp: r.emergency_contact_phone
         ? this.whatsappLink(
             r.emergency_contact_phone,
-            this.emergencyText(r.full_name, r.lat, r.lng),
+            this.emergencyText(
+              r.full_name, r.lat, r.lng,
+              r.ride_reference
+                ? {
+                    reference: r.ride_reference, status: r.ride_status,
+                    pickup: r.pickup_address, dropoff: r.dropoff_address,
+                    riderName: null, riderPhone: null,
+                    driverName: null, driverPhone: null, vehicle: null,
+                  }
+                : null,
+              r.raised_by, r.phone,
+            ),
           )
         : null,
     }));
