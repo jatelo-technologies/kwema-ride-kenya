@@ -97,8 +97,22 @@ jobs:
           mkdir -p "$HOME/.gradle/init.d"
           cat > "$HOME/.gradle/init.d/force-compile-sdk.gradle" <<'GRADLE'
           allprojects {
+              // Android Lint's release check (lintVital*) crashes on some
+              // plugin sources under the current toolchain
+              // (NoSuchMethodError in JavaDocParser / CommentDetector) and
+              // fails the whole build. It checks nothing in our Dart code,
+              // so it is switched off for CI builds.
+              tasks.configureEach { t ->
+                  if (t.name.startsWith('lintVital')) { t.enabled = false }
+              }
               afterEvaluate { p ->
                   def android = p.extensions.findByName('android')
+                  if (android != null) {
+                      try {
+                          android.lint.checkReleaseBuilds = false
+                          android.lint.abortOnError = false
+                      } catch (Throwable ignored) {}
+                  }
                   if (android != null && p.name != 'app') {
                       def declared = android.compileSdkVersion?.toString() ?: ''
                       def m = (declared =~ /(\d+)/)
