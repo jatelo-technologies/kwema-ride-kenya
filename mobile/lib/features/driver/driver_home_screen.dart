@@ -20,6 +20,7 @@ import '../../core/country_config.dart';
 import 'driver_controller.dart';
 import 'incoming_ride_modal.dart';
 import '../shared/contact_sheet.dart';
+import '../shared/share_trip_button.dart';
 import '../shared/sos_button.dart';
 import '../shared/rating_sheet.dart';
 import 'handover_sheet.dart';
@@ -804,6 +805,8 @@ class _ActiveTripPanel extends ConsumerWidget {
                 ),
                 const SizedBox(height: 10),
               ],
+              ShareTripButton(rideId: ride.id),
+              const SizedBox(height: 10),
               SosButton(rideId: ride.id, compact: true),
 
               const SizedBox(height: 12),
