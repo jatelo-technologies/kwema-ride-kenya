@@ -123,6 +123,7 @@ export class AdminService {
               d.state, d.completed_trips, d.acceptance_rate,
               d.wallet_balance_cents, d.debt_ceiling_cents,
               d.compliance_verified_at,
+              d.ntsa_verified_at, d.ntsa_reference, d.commission_free_until,
               d.driving_licence_no, d.driving_licence_expiry,
               d.operator_licence_no, d.operator_licence_expiry,
               v.plate_number, v.make, v.model, v.category,
@@ -145,7 +146,7 @@ export class AdminService {
    * the gate between an application and a vehicle carrying passengers under
    * your operator licence, so it fails closed.
    */
-  async verifyDriver(driverId: string, adminUserId: string) {
+  async verifyDriver(driverId: string, adminUserId: string, ntsaReference?: string) {
     const [driver] = await this.db.query(
       `SELECT d.id, d.driving_licence_no, d.driving_licence_expiry,
               d.operator_licence_expiry, d.active_vehicle_id,
@@ -172,15 +173,29 @@ export class AdminService {
       problems.push('Operator licence expired');
     }
 
+    // NTSA vetting: the admin must have checked the driving licence, PSV
+    // badge and vehicle against NTSA's records and recorded what they saw.
+    const ntsa = String(ntsaReference ?? '').trim();
+    if (ntsa.length < 3) {
+      problems.push('NTSA check not recorded (enter the NTSA / eCitizen reference you verified)');
+    }
+
     if (problems.length) {
       throw new BadRequestException(`cannot approve: ${problems.join('; ')}`);
     }
 
+    // Commission-free window starts at FIRST approval only; re-approving a
+    // suspended driver never restarts it.
+    const freeDays = Math.max(0, Number(process.env.DRIVER_COMMISSION_FREE_DAYS ?? 30) || 0);
     await this.db.query(
       `UPDATE drivers
-          SET compliance_verified_at = now(), compliance_verified_by = $2
+          SET compliance_verified_at = now(), compliance_verified_by = $2,
+              ntsa_verified_at = now(), ntsa_verified_by = $2, ntsa_reference = $3,
+              commission_free_until = COALESCE(
+                commission_free_until,
+                CASE WHEN $4::int > 0 THEN now() + make_interval(days => $4::int) END)
         WHERE id = $1`,
-      [driverId, adminUserId],
+      [driverId, adminUserId, ntsa.slice(0, 80), freeDays],
     );
     this.logger.log(`driver ${driverId} approved by ${adminUserId}`);
     return { approved: true };

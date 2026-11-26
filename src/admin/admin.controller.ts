@@ -1,7 +1,7 @@
 import {
   Body, Controller, ForbiddenException, Get, Param, Post, Query, UseGuards,
 } from '@nestjs/common';
-import { IsIn, IsInt, IsNumber, IsOptional, IsString, Matches, Min } from 'class-validator';
+import { IsIn, IsInt, IsNumber, IsOptional, IsString, Length, Matches, Min } from 'class-validator';
 
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { CurrentUser, AuthedUser } from '../auth/current-user.decorator';
@@ -49,6 +49,12 @@ class PublishTariffDto {
   @IsString() gazetteReference: string;
 }
 
+class VerifyDriverDto {
+  /** What the admin checked on NTSA (eCitizen / TIMS), e.g. a search or record reference. */
+  @IsOptional() @IsString() @Length(0, 80)
+  ntsaReference?: string;
+}
+
 class SuspendDto {
   @IsString() reason: string;
 }
@@ -88,9 +94,13 @@ export class AdminController {
   }
 
   @Post('drivers/:id/verify')
-  verify(@CurrentUser() user: AuthedUser, @Param('id') id: string) {
+  verify(
+    @CurrentUser() user: AuthedUser,
+    @Param('id') id: string,
+    @Body() dto: VerifyDriverDto,
+  ) {
     this.assertAdmin(user);
-    return this.admin.verifyDriver(id, user.id);
+    return this.admin.verifyDriver(id, user.id, dto?.ntsaReference);
   }
 
   @Post('drivers/:id/suspend')
