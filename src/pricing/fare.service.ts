@@ -64,6 +64,8 @@ export interface FareInput {
    * solo fare, the ceiling no pool rider can exceed.
    */
   poolDiscountBps?: number;
+  /** Driver is inside their commission-free window: the platform takes nothing. */
+  commissionFree?: boolean;
   /** Quote only: also price the shared fare so the app can show it. */
   pool?: boolean;
 }
@@ -264,8 +266,11 @@ export class FareService {
     // Commission is charged on the transport fare only, excluding the
     // booking fee and any zone surcharge that is passed through.
     const commissionableCents = fareBeforeBooking - zoneSurchargeCents;
+    // A new driver's commission-free window: the platform takes nothing,
+    // the driver keeps the whole transport fare.
+    const commissionBps = input.commissionFree ? 0 : tariff.commissionBpsCap;
     const commissionCents = Math.round(
-      (commissionableCents * tariff.commissionBpsCap) / BPS_DIVISOR,
+      (commissionableCents * commissionBps) / BPS_DIVISOR,
     );
     const vatOnCommissionCents = Math.round((commissionCents * VAT_BPS) / BPS_DIVISOR);
 
@@ -292,7 +297,7 @@ export class FareService {
       bookingFeeCents,
       totalFareCents,
       commissionCents,
-      commissionBpsApplied: tariff.commissionBpsCap,
+      commissionBpsApplied: commissionBps,
       vatOnCommissionCents,
       driverEarningsCents,
       explain: [
