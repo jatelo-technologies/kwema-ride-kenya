@@ -20,6 +20,7 @@ import { EarningsModule } from './earnings/earnings.module';
 import { AdminModule } from './admin/admin.module';
 import { ApplicationsModule } from './applications/applications.module';
 import { SafetyModule } from './safety/safety.module';
+import { ShareModule } from './share/share.module';
 import { PhotosModule } from './photos/photos.module';
 import { DeliveriesModule } from './deliveries/deliveries.module';
 import { HealthController } from './health/health.controller';
@@ -89,6 +90,7 @@ import { JobsService } from './common/jobs.service';
     NotificationsModule,
     MessagesModule,
     SafetyModule,
+    ShareModule,
     PhotosModule,
     DeliveriesModule,
     MapsModule,
