@@ -366,7 +366,12 @@ export class RidesService {
     // Fallback only — the live tariff is the source of truth. Kept in step
     // with the operator's standard rate so a missing tariff cannot quietly
     // show a driver a higher take-home than they will actually receive.
-    const commissionBps = Number(detail.commission_bps_cap ?? 1500);
+    const [freeWindow] = await this.db.query(
+      `SELECT (commission_free_until IS NOT NULL AND commission_free_until > now()) AS free
+         FROM drivers WHERE id = $1`,
+      [driverId],
+    );
+    const commissionBps = freeWindow?.free ? 0 : Number(detail.commission_bps_cap ?? 1500);
 
     void this.pushDriverOffer(driverId, rideId);
     this.gateway.server.to(`driver:${driverId}`).emit('ride:request', {
@@ -925,6 +930,14 @@ export class RidesService {
     }
     const poolDiscountBps = discountBpsFor(sharedWith);
 
+    // New drivers keep the whole fare during their commission-free window.
+    const [freeWindow] = await this.db.query(
+      `SELECT (commission_free_until IS NOT NULL AND commission_free_until > $2) AS free
+         FROM drivers WHERE id = $1`,
+      [driverId, at],
+    );
+    const commissionFree = Boolean(freeWindow?.free);
+
     const { fare, needsReview } = await this.fares.settle(
       {
         category: ride.requested_category,
@@ -934,6 +947,7 @@ export class RidesService {
         pickup: { lat: Number(ride.pickup_lat), lng: Number(ride.pickup_lng) },
         lockedSurge: Number(ride.surge_multiplier),
         poolDiscountBps,
+        commissionFree,
       },
       Number(ride.quoted_fare_cents),
     );
