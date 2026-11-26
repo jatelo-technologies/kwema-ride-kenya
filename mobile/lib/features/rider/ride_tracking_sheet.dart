@@ -13,6 +13,7 @@ import '../../core/models/models.dart';
 import '../../core/theme/app_theme.dart';
 import 'rider_controller.dart';
 import '../shared/sos_button.dart';
+import '../shared/share_trip_button.dart';
 import '../shared/profile_photo.dart';
 import '../../core/country_config.dart';
 
@@ -333,6 +334,8 @@ class RideTrackingSheet extends ConsumerWidget {
               // already gone wrong.
               if (!ride.status.isTerminal) ...[
                 const SizedBox(height: 12),
+                ShareTripButton(rideId: ride.id),
+                const SizedBox(height: 10),
                 Row(children: [
                   Expanded(child: SosButton(rideId: ride.id, compact: true)),
                 ]),
