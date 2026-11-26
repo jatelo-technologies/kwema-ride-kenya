@@ -170,6 +170,11 @@ header{position:sticky;top:0;z-index:60;background:rgba(255,255,255,.88);
 .earn .k{font-size:15px;color:var(--lk-100)}
 .earn .v{font-family:'Bricolage Grotesque',sans-serif;font-size:22px;font-weight:800}
 .earn .v.mg{color:var(--mg-500)}
+.earn .row.take{align-items:center;padding-top:20px}
+.earn .row.take .k{font-size:19px;font-weight:700;color:#fff}
+.earn .row.take .v{font-size:64px;line-height:1}
+.pays.safety{grid-template-columns:1fr 1fr 1fr}
+.band-sand .pays.safety .nets span{background:var(--paper)}
 .reqs{margin-top:26px;display:grid;gap:11px;list-style:none}
 .reqs li{display:flex;gap:11px;font-size:15.5px;color:var(--lk-100)}
 .reqs .tick{color:var(--mg-500);font-weight:800;flex:none}
@@ -212,7 +217,8 @@ footer a:hover{color:#fff}
 @media(max-width:940px){
   .hero-grid,.dl-grid,.driver-grid{grid-template-columns:1fr;gap:44px}
   .hero{padding-top:52px}
-  .pays{grid-template-columns:1fr}
+  .pays,.pays.safety{grid-template-columns:1fr}
+  .earn .row.take .v{font-size:52px}
   .journey{grid-template-columns:1fr;gap:34px}
   .journey::before{display:none}
   .stop{text-align:left;padding:0;display:grid;grid-template-columns:28px 1fr;gap:16px}

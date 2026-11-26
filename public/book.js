@@ -512,8 +512,8 @@
     if (state.pool !== 'off') {
       html += '<div class="pool-box">' +
         '<div class="pool-price">' + fill(T('pool.price'), {
-          shared: kwemaTzs(pv.sharedFareCents), best: kwemaTzs(pv.bestFareCents),
-          solo: kwemaTzs(state.selected.fare.totalFareCents),
+          shared: kwemaMoney(pv.sharedFareCents), best: kwemaMoney(pv.bestFareCents),
+          solo: kwemaMoney(state.selected.fare.totalFareCents),
         }) + '</div>' +
         '<div class="pool-note">' + fill(T('pool.' + (state.pool === 'host' ? 'note_host' : 'note_match')),
           { seats: pv.seats }) + '</div>' +
@@ -1049,14 +1049,14 @@
       (r.coRiders > 0 && !done
         ? '<div class="pool-note" style="text-align:center;margin-bottom:8px">' + fill(T('pool.sharing'), { n: r.coRiders }) + '</div>' : '') +
       (r.saved > 0 && r.status === 'completed'
-        ? '<div class="pool-note" style="text-align:center;margin-bottom:8px">' + fill(T('pool.saved'), { amount: kwemaTzs(r.saved) }) + '</div>' : '') +
+        ? '<div class="pool-note" style="text-align:center;margin-bottom:8px">' + fill(T('pool.saved'), { amount: kwemaMoney(r.saved) }) + '</div>' : '') +
       card +
       (live && d
         ? '<div style="display:flex;gap:8px;margin:10px 0">' +
           '<button class="btn btn-ghost" style="flex:1" id="chat-btn">' + chatLabel() + '</button>' +
           '<button class="btn btn-primary" style="flex:1" id="call-btn">📞 ' + L3('Piga simu', 'Call', 'Appeler') + '</button></div>'
         : '') +
-      (fare ? '<p style="text-align:center;font-weight:800;font-size:18px;margin:8px 0">' + kwemaTzs(fare) + '</p>' : '') +
+      (fare ? '<p style="text-align:center;font-weight:800;font-size:18px;margin:8px 0">' + kwemaMoney(fare) + '</p>' : '') +
       (r.status === 'completed' && !r.isPaid && r.paymentMethod && r.paymentMethod !== 'cash'
         ? '<button class="btn btn-primary" style="width:100%" id="pay">' + T('pay.mm.t') + '</button>' : '') +
       (!done ? '<button class="btn-sos" id="sos">' +
