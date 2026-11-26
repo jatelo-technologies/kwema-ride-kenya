@@ -24,6 +24,7 @@ import Redis from 'ioredis';
 
 import { REDIS } from '../common/redis.module';
 import { country } from '../common/country';
+import { ShareService } from '../share/share.service';
 
 export interface SosContext {
   name: string | null;
@@ -72,6 +73,7 @@ export class SafetyService {
   constructor(
     private readonly db: DataSource,
     @Inject(REDIS) private readonly redis: Redis,
+    private readonly share: ShareService,
   ) {}
 
   /**
@@ -152,7 +154,18 @@ export class SafetyService {
         .catch(() => undefined);
     }
 
-    void this.notifyEmergencyContact(alertId, input.role, context, input.lat, input.lng);
+    // A live tracking link for the trip, so the contact can follow the
+    // vehicle in real time and not only see where the alert was raised.
+    let trackUrl: string | null = null;
+    if (input.rideId) {
+      try {
+        trackUrl = (await this.share.create(input.rideId, input.userId, 'sos')).url;
+      } catch (err) {
+        this.logger.error(`SOS share link failed: ${(err as Error).message}`);
+      }
+    }
+
+    void this.notifyEmergencyContact(alertId, input.role, context, input.lat, input.lng, trackUrl);
 
     return {
       raised: true,
@@ -306,12 +319,14 @@ export class SafetyService {
     ride?: SosContext['ride'] | null,
     role: 'rider' | 'driver' | null = null,
     phone: string | null = null,
+    trackUrl: string | null = null,
   ): string {
     const f = this.emergencyFacts(name, role, phone, lat, lng, ride);
     return (
       `${country.brand.toUpperCase()} EMERGENCY\n\n` +
       `${f.who}${f.phone ? ` (${f.phone})` : ''} raised an emergency alert at ${f.time}.\n\n` +
       `Location: ${f.location}\n` +
+      (trackUrl ? `Follow the trip live: ${trackUrl}\n` : '') +
       (f.rideParts.length ? `\n${f.rideParts.join('\n')}\n` : '') +
       `\nCall them now. If you cannot reach them, call ${f.emergencyLine}.`
     );
@@ -412,12 +427,13 @@ export class SafetyService {
     context: SosContext,
     lat?: number | null,
     lng?: number | null,
+    trackUrl: string | null = null,
   ): Promise<void> {
     try {
       const to = context.emergencyContactPhone;
       if (!to) return;
 
-      const text = this.emergencyText(context.name, lat, lng, context.ride, role, context.phone);
+      const text = this.emergencyText(context.name, lat, lng, context.ride, role, context.phone, trackUrl);
       const f = this.emergencyFacts(context.name, role, context.phone, lat, lng, context.ride);
 
       // Both channels, deliberately. WhatsApp carries the map link properly
@@ -426,7 +442,7 @@ export class SafetyService {
       // not worth optimising away.
       const viaWhatsApp = await this.sendWhatsApp(to, text, [
         `${f.who}${f.phone ? ` (${f.phone})` : ''} at ${f.time}`,
-        f.location,
+        trackUrl ? `${f.location} Live tracking: ${trackUrl}` : f.location,
         f.rideParts.length ? f.rideParts.join('; ') : 'Not on a trip',
         f.emergencyLine,
       ]);
