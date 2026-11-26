@@ -1059,6 +1059,8 @@
       (fare ? '<p style="text-align:center;font-weight:800;font-size:18px;margin:8px 0">' + kwemaMoney(fare) + '</p>' : '') +
       (r.status === 'completed' && !r.isPaid && r.paymentMethod && r.paymentMethod !== 'cash'
         ? '<button class="btn btn-primary" style="width:100%" id="pay">' + T('pay.mm.t') + '</button>' : '') +
+      (!done ? '<button class="btn btn-ghost" style="width:100%;margin-top:10px" id="share-trip">📍 ' + T('share.btn') + '</button>' +
+        '<div id="share-opts" hidden style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap"></div>' : '') +
       (!done ? '<button class="btn-sos" id="sos">' +
         (lang === 'fr' ? 'Urgence' : lang === 'en' ? 'Emergency' : 'Dharura') + '</button>' : '') +
       // Booking again never waits: not for payment, not for another ride.
@@ -1086,6 +1088,37 @@
     if (closeBtn) closeBtn.addEventListener('click', () => { dropRide(r.id); if (state.ride) { renderRides(); syncMap(); } else renderBooking(); });
     const pay = document.getElementById('pay'); if (pay) pay.addEventListener('click', payNow);
     const sos = document.getElementById('sos'); if (sos) sos.addEventListener('click', raiseSos);
+    const shareBtn = document.getElementById('share-trip');
+    if (shareBtn) shareBtn.addEventListener('click', () => shareTrip(r.id || r.rideId));
+  }
+
+  /**
+   * Live trip sharing: gets a tracking link for this trip and offers it on
+   * WhatsApp, SMS or the phone's own share sheet. Anyone with the link sees
+   * the vehicle move until the trip ends.
+   */
+  async function shareTrip(rideId) {
+    const box = document.getElementById('share-opts');
+    try {
+      const out = await api('/api/rides/' + encodeURIComponent(rideId) + '/share', { method: 'POST' });
+      if (navigator.share) {
+        try { await navigator.share({ title: 'Kwema Ride', text: out.text }); return; }
+        catch (e) { /* dismissed or unsupported: fall back to the buttons */ }
+      }
+      if (!box) return;
+      box.hidden = false;
+      box.innerHTML =
+        '<a class="btn btn-primary" style="flex:1;text-align:center" target="_blank" rel="noopener" href="' + esc(out.whatsappUrl) + '">' + T('share.whatsapp') + '</a>' +
+        '<a class="btn btn-ghost" style="flex:1;text-align:center" href="' + esc(out.smsUrl) + '">' + T('share.sms') + '</a>' +
+        '<button class="btn btn-ghost" style="flex:1" id="share-copy">' + T('share.copy') + '</button>';
+      const copy = document.getElementById('share-copy');
+      copy.addEventListener('click', async () => {
+        try { await navigator.clipboard.writeText(out.url); copy.textContent = T('share.copied'); }
+        catch (e) { prompt(T('share.copy'), out.url); }
+      });
+    } catch (e) {
+      alert(e.message || 'Could not create the link');
+    }
   }
 
   async function payNow() {

@@ -170,6 +170,11 @@ header{position:sticky;top:0;z-index:60;background:rgba(255,255,255,.88);
 .earn .k{font-size:15px;color:var(--lk-100)}
 .earn .v{font-family:'Bricolage Grotesque',sans-serif;font-size:22px;font-weight:800}
 .earn .v.mg{color:var(--mg-500)}
+.earn .promo{background:var(--mg-500);color:var(--lk-900);border-radius:var(--r);
+  padding:18px 20px;margin-bottom:12px}
+.earn .promo-big{font-family:'Bricolage Grotesque',sans-serif;font-weight:800;
+  font-size:26px;line-height:1.15}
+.earn .promo-sub{font-size:14.5px;margin-top:6px;font-weight:600}
 .earn .row.take{align-items:center;padding-top:20px}
 .earn .row.take .k{font-size:19px;font-weight:700;color:#fff}
 .earn .row.take .v{font-size:64px;line-height:1}
@@ -268,9 +273,9 @@ footer a:hover{color:#fff}
   font-weight:400 !important;line-height:1.5;cursor:pointer}
 .apply-consent input{width:19px;height:19px;flex:none;margin-top:2px;accent-color:var(--lk-500)}
 
-/* Off-screen rather than display:none — a bot reading the DOM still sees a
-   field worth filling, which is the whole point of a honeypot. */
-.hp{position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden}
+/* Honeypot: never shown to people. Bots that fill every input in the HTML
+   still find it and are discarded by the server. */
+.hp{display:none !important}
 
 .apply-note{padding:13px 15px;border-radius:var(--r);font-size:14.5px;margin-bottom:18px}
 .apply-ok{background:#E3F3EA;color:var(--go)}

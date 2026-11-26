@@ -485,7 +485,10 @@
                  '<span class="pill p-bad">no vehicle</span>'}</td>
             <td>${d.compliance_verified_at
                   ? `<span class="pill ${d.state === 'offline' ? 'p-mute' : 'p-ok'}">${esc(d.state)}</span>`
-                  : '<span class="pill p-warn">unapproved</span>'}</td>
+                  : '<span class="pill p-warn">unapproved</span>'}
+                ${d.ntsa_verified_at ? `<span class="pill p-ok" title="${esc(d.ntsa_reference || '')}">NTSA ✓</span>` : ''}
+                ${d.commission_free_until && d.commission_free_until > new Date().toISOString()
+                  ? `<span class="pill p-ok" title="No commission until ${esc(String(d.commission_free_until).slice(0, 10))}">0% until ${esc(String(d.commission_free_until).slice(0, 10))}</span>` : ''}</td>
             <td>${d.completed_trips}</td>
             <td>${Number(d.rating_avg).toFixed(2)} <span style="color:var(--muted)">(${d.rating_count})</span></td>
             <td class="money ${bal > 0 ? 'pos' : bal < 0 ? 'neg' : ''}">${fmtMoney(bal)}</td>
@@ -498,7 +501,20 @@
 
       box.querySelectorAll('[data-verify]').forEach((b) => {
         b.onclick = async () => {
-          try { await api(`/admin/drivers/${b.dataset.verify}/verify`, { method: 'POST' }); loadDrivers(); }
+          // NTSA vetting is part of approval: check the driving licence, PSV
+          // badge and vehicle on NTSA (eCitizen / TIMS) first, then record
+          // what you checked. Approval is refused without it.
+          const ntsa = prompt(
+            'NTSA check\n\nBefore approving, look up this driver\'s driving licence, PSV badge ' +
+            'and vehicle on NTSA (eCitizen / TIMS) and confirm they are valid.\n\n' +
+            'Enter what you verified (e.g. "eCitizen DL + PSV checked, 26 Nov, valid"):');
+          if (!ntsa || ntsa.trim().length < 3) return;
+          try {
+            await api(`/admin/drivers/${b.dataset.verify}/verify`, {
+              method: 'POST', body: JSON.stringify({ ntsaReference: ntsa.trim() }),
+            });
+            loadDrivers();
+          }
           catch (e) { alert(e.message); }
         };
       });
